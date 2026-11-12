@@ -42,8 +42,10 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        SVERKA_BACKEND_URL: http://backend:8000
+    environment:
+      SVERKA_BACKEND_URL: http://backend:8000
+      # локально по http: cookie сессии без флага Secure. В проде за HTTPS убрать.
+      SVERKA_INSECURE_COOKIE: "1"
     depends_on: [backend]
     ports: ["3000:3000"]
 

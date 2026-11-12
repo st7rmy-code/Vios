@@ -1,12 +1,7 @@
 /** @type {import('next').NextConfig} */
-const backend = process.env.SVERKA_BACKEND_URL ?? "http://localhost:8000";
-
 const nextConfig = {
+  // /api/v1/* проксирует route handler src/app/api/v1/[...path]: он добавляет токен из httpOnly cookie.
   output: "standalone",
-  async rewrites() {
-    // Браузер ходит на тот же origin, Next проксирует в FastAPI: CORS не нужен.
-    return [{ source: "/api/v1/:path*", destination: `${backend}/api/v1/:path*` }];
-  },
 };
 
 export default nextConfig;

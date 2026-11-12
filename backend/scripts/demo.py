@@ -106,7 +106,7 @@ running = ok(c.post("/experiments", headers=own, json={
     "title": "Сообщение в MAX с промокодом",
     "protocol": {**protocol, "hypothesis": "Персональное сообщение возвращает часть ушедших",
                  "action": "Сообщение в MAX с промокодом на месяц", "as_of": (TODAY - timedelta(days=3)).isoformat(),
-                 "control_share": "0.3", "cost_rub": "3000.00", "max_inactive_days": 365}}))
+                 "control_share": "0.3", "cost_rub": "3000.00", "inactive_days": 150, "max_inactive_days": 365}}))
 r = c.post(f"/experiments/{running['id']}/register", headers=own)
 print("идёт:", running["id"], r.status_code)
 

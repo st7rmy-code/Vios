@@ -3,15 +3,15 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY . .
-# адрес бэкенда для rewrites фиксируется при сборке
-ARG SVERKA_BACKEND_URL=http://backend:8000
-ENV SVERKA_BACKEND_URL=$SVERKA_BACKEND_URL NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
-ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+# адрес FastAPI читает прокси /api/v1/* при запуске: SVERKA_BACKEND_URL
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 SVERKA_BACKEND_URL=http://backend:8000
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
+COPY --from=build /app/public ./public
 EXPOSE 3000
 CMD ["node", "server.js"]

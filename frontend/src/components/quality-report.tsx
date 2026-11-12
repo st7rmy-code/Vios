@@ -1,4 +1,6 @@
-import { AlertTriangle, CheckCircle2, ShieldAlert } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Info, ShieldAlert } from "lucide-react";
+
+import { CopyValue } from "@/components/copy";
 
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +11,10 @@ import { IMPORT_KIND } from "@/lib/labels";
 
 type Report = {
   blocking: string[];
+  warnings?: string[];
+  orphan_customers?: number;
+  visits_collapsed?: number;
+  debt_kopecks?: number;
   pii_columns: Record<string, string>;
   rows_total: number;
   rows_valid: number;
@@ -36,8 +42,8 @@ export function QualityReport({ imp }: { imp: ImportFile }) {
       <div className="flex flex-wrap items-center gap-2">
         {rejected ? (
           <Badge variant="destructive">Отклонён</Badge>
-        ) : r.rows_invalid ? (
-          <Badge variant="warning">Принят с замечаниями</Badge>
+        ) : r.rows_invalid || r.warnings?.length ? (
+          <Badge variant="warning">Принят с предупреждением</Badge>
         ) : (
           <Badge variant="success">Принят</Badge>
         )}
@@ -68,9 +74,18 @@ export function QualityReport({ imp }: { imp: ImportFile }) {
           <span>{b}</span>
         </Alert>
       ))}
-      {r.same_file_imported_before && (
-        <Alert variant="warning">Этот же файл уже загружался раньше: повторные оплаты по номеру не задвоятся.</Alert>
+      {imp.duplicate_of && (
+        <Alert className="flex gap-3">
+          <Info className="mt-0.5 h-5 w-5 shrink-0" />
+          <span>Этот файл уже загружен раньше. Данные не изменились, ниже отчёт той загрузки.</span>
+        </Alert>
       )}
+      {(r.warnings ?? []).map((w) => (
+        <Alert key={w} variant="warning" className="flex gap-3">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+          <span>{w}</span>
+        </Alert>
+      ))}
 
       {!rejected && (
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -80,7 +95,12 @@ export function QualityReport({ imp }: { imp: ImportFile }) {
           <Stat label="Дубликатов" value={num(r.duplicates)} />
           <Stat label="Клиентов" value={num(r.customers)} />
           <Stat label="Период" value={`${date(r.date_min)} — ${date(r.date_max)}`} />
-          {r.total_amount_kopecks != null && <Stat label="Сумма оплат" value={kopecksToRubExact(r.total_amount_kopecks)} />}
+          {r.total_amount_kopecks != null && imp.kind === "payments" && (
+            <Stat label="Сумма платежей" value={kopecksToRubExact(r.total_amount_kopecks)} />
+          )}
+          {!!r.orphan_customers && <Stat label="Новых клиентов из файла" value={num(r.orphan_customers)} />}
+          {!!r.visits_collapsed && <Stat label="Склеено повторных посещений" value={num(r.visits_collapsed)} />}
+          {!!r.debt_kopecks && <Stat label="Долги клиентов" value={kopecksToRubExact(r.debt_kopecks)} />}
           {r.unknown_columns.length > 0 && <Stat label="Лишние колонки" value={r.unknown_columns.join(", ")} />}
         </dl>
       )}
@@ -115,7 +135,9 @@ export function QualityReport({ imp }: { imp: ImportFile }) {
           </Table>
         </div>
       )}
-      <p className="break-all font-mono text-xs text-muted-foreground">SHA-256: {imp.sha256}</p>
+      <p className="text-xs text-muted-foreground">
+        SHA-256 файла: <CopyValue value={imp.sha256} />
+      </p>
     </div>
   );
 }
