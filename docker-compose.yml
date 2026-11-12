@@ -39,6 +39,14 @@ services:
       SVERKA_SECRET_KEY: ${SVERKA_SECRET_KEY:-dev-secret-change-me}
     ports: ["8000:8000"]
 
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        SVERKA_BACKEND_URL: http://backend:8000
+    depends_on: [backend]
+    ports: ["3000:3000"]
+
 volumes:
   pgdata:
   minio:

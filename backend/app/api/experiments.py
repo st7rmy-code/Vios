@@ -17,6 +17,7 @@ from app.deps import check_business, current_user, require
 from app.models import Assignment, AuditLog, Experiment, ExperimentResult, ExperimentStatus, Role, User
 from app.schemas import (
     AssignmentOut,
+    CertificateOut,
     ExperimentCreate,
     ExperimentOut,
     ExperimentUpdate,
@@ -185,7 +186,7 @@ def get_result(exp_id: uuid.UUID, db: Session = Depends(get_session),
                      payload=res.payload)
 
 
-@router.get("/experiments/{exp_id}/certificate", operation_id="getCertificate")
+@router.get("/experiments/{exp_id}/certificate", response_model=CertificateOut, operation_id="getCertificate")
 def certificate(exp_id: uuid.UUID, db: Session = Depends(get_session),
                 user: User = Depends(current_user)) -> dict:
     """Данные сертификата: протокол, хэши и ссылки на записи журнала для проверки."""

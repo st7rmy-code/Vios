@@ -935,9 +935,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Getcertificate"
+                  "$ref": "#/components/schemas/CertificateOut"
                 }
               }
             }
@@ -1318,6 +1316,122 @@
           "name"
         ],
         "title": "BusinessOut"
+      },
+      "CertificateAuditEntry": {
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurred At"
+          },
+          "hash": {
+            "type": "string",
+            "title": "Hash"
+          }
+        },
+        "type": "object",
+        "required": [
+          "seq",
+          "action",
+          "occurred_at",
+          "hash"
+        ],
+        "title": "CertificateAuditEntry"
+      },
+      "CertificateOut": {
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Experiment Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "protocol": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Protocol"
+          },
+          "protocol_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol Hash"
+          },
+          "seed": {
+            "type": "string",
+            "title": "Seed"
+          },
+          "registered_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Registered At"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Result"
+          },
+          "result_hash": {
+            "type": "string",
+            "title": "Result Hash"
+          },
+          "audit": {
+            "items": {
+              "$ref": "#/components/schemas/CertificateAuditEntry"
+            },
+            "type": "array",
+            "title": "Audit"
+          }
+        },
+        "type": "object",
+        "required": [
+          "experiment_id",
+          "title",
+          "protocol",
+          "protocol_hash",
+          "seed",
+          "registered_at",
+          "closed_at",
+          "result",
+          "result_hash",
+          "audit"
+        ],
+        "title": "CertificateOut"
       },
       "ChainOut": {
         "properties": {
