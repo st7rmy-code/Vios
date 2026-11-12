@@ -1,12 +1,10 @@
-"""Модели данных.
+"""Модели данных (спецификация, раздел 4).
 
-ВРЕМЕННО: раздел «Модель данных» спецификации ещё не получен. Таблицы ниже —
-рабочее допущение, после получения раздела приводятся к нему один в один.
-
-Принципы, которые не зависят от спецификации:
+Принципы:
 * в базе нет ФИО, телефонов и email клиентов, только внешний customer_id;
 * деньги — целые копейки (BigInteger);
-* audit_log — только INSERT (триггер в миграции), цепочка sha256.
+* audit_log, assignment, experiment_result — только INSERT (триггеры в миграциях),
+  протокол эксперимента неизменяем после регистрации (триггер).
 """
 
 from __future__ import annotations
@@ -24,8 +22,12 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Boolean,
+    CheckConstraint,
+    Index,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -53,6 +55,30 @@ class ImportKind(str, enum.Enum):
     customers = "customers"
     payments = "payments"
     visits = "visits"
+    obligations = "obligations"
+
+
+class PaymentOperation(str, enum.Enum):
+    payment = "payment"
+    refund = "refund"
+
+
+class ObligationKind(str, enum.Enum):
+    subscription = "subscription"
+    package = "package"
+    prepayment = "prepayment"
+    debt = "debt"
+
+
+class ObligationStatus(str, enum.Enum):
+    active = "active"
+    frozen = "frozen"
+    closed = "closed"
+    cancelled = "cancelled"
+
+
+class ConsentKind(str, enum.Enum):
+    csv_upload = "csv_upload"
 
 
 class ImportStatus(str, enum.Enum):
@@ -64,6 +90,7 @@ class Business(Base):
     __tablename__ = "business"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(200))
+    timezone: Mapped[str] = mapped_column(String(64), server_default="Europe/Moscow", default="Europe/Moscow")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -76,11 +103,33 @@ class User(Base):
     login: Mapped[str] = mapped_column(String(200), unique=True)
     password_hash: Mapped[str] = mapped_column(String(300))
     role: Mapped[Role] = mapped_column(Enum(Role, name="role"))
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DataConsent(Base):
+    """Согласие собственника на обработку данных. Одно действующее на (business_id, kind)."""
+
+    __tablename__ = "data_consent"
+    __table_args__ = (
+        Index("uq_consent_active", "business_id", "kind", unique=True, postgresql_where=text("revoked_at IS NULL")),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("business.id"), index=True)
+    kind: Mapped[ConsentKind] = mapped_column(Enum(ConsentKind, name="consent_kind"))
+    text_version: Mapped[str] = mapped_column(String(50))
+    granted_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("app_user.id"))
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ImportFile(Base):
     __tablename__ = "import_file"
+    __table_args__ = (
+        Index("uq_import_accepted_sha", "business_id", "sha256", unique=True,
+              postgresql_where=text("status = 'accepted'")),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("business.id"), index=True)
     kind: Mapped[ImportKind] = mapped_column(Enum(ImportKind, name="import_kind"))
@@ -105,27 +154,64 @@ class Customer(Base):
     branch: Mapped[str | None] = mapped_column(String(100))
     first_paid_at: Mapped[date | None] = mapped_column(Date)
     subscription_ends_at: Mapped[date | None] = mapped_column(Date)
+    frozen_until: Mapped[date | None] = mapped_column(Date)
     import_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("import_file.id"))
 
 
 class Payment(Base):
     __tablename__ = "payment"
-    __table_args__ = (UniqueConstraint("business_id", "external_id"),)
+    __table_args__ = (
+        UniqueConstraint("business_id", "external_id"),
+        CheckConstraint("amount_kopecks > 0", name="ck_payment_amount_positive"),
+        Index("ix_payment_business_customer_paid", "business_id", "customer_external_id", "paid_at"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("business.id"), index=True)
     external_id: Mapped[str] = mapped_column(String(100))
     customer_external_id: Mapped[str] = mapped_column(String(100), index=True)
     paid_at: Mapped[date] = mapped_column(Date)
     amount_kopecks: Mapped[int] = mapped_column(BigInteger)
+    operation: Mapped[PaymentOperation] = mapped_column(
+        Enum(PaymentOperation, name="payment_operation"), server_default="payment", default=PaymentOperation.payment
+    )
+    method: Mapped[str | None] = mapped_column(String(20))
+    branch: Mapped[str | None] = mapped_column(String(100))
     import_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("import_file.id"))
 
 
 class Visit(Base):
     __tablename__ = "visit"
+    __table_args__ = (
+        UniqueConstraint("business_id", "customer_external_id", "visited_at", "branch",
+                         name="uq_visit_key", postgresql_nulls_not_distinct=True),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("business.id"), index=True)
     customer_external_id: Mapped[str] = mapped_column(String(100), index=True)
     visited_at: Mapped[date] = mapped_column(Date)
+    branch: Mapped[str | None] = mapped_column(String(100))
+    import_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("import_file.id"))
+
+
+class Obligation(Base):
+    """Реестр обязательств: абонементы, пакеты, предоплаты, долги (раздел 4.2)."""
+
+    __tablename__ = "obligation"
+    __table_args__ = (UniqueConstraint("business_id", "external_id"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("business.id"), index=True)
+    external_id: Mapped[str] = mapped_column(String(100))
+    customer_external_id: Mapped[str] = mapped_column(String(100), index=True)
+    kind: Mapped[ObligationKind] = mapped_column(Enum(ObligationKind, name="obligation_kind"))
+    starts_at: Mapped[date] = mapped_column(Date)
+    ends_at: Mapped[date | None] = mapped_column(Date)
+    visits_total: Mapped[int | None] = mapped_column(Integer)
+    visits_used: Mapped[int | None] = mapped_column(Integer)
+    amount_kopecks: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[ObligationStatus] = mapped_column(Enum(ObligationStatus, name="obligation_status"))
+    frozen_from: Mapped[date | None] = mapped_column(Date)
+    frozen_until: Mapped[date | None] = mapped_column(Date)
+    branch: Mapped[str | None] = mapped_column(String(100))
     import_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("import_file.id"))
 
 
@@ -140,8 +226,9 @@ class Experiment(Base):
     # Протокол: правило когорты, доля контроля, окно замера, стоимость C, действие.
     protocol: Mapped[dict] = mapped_column(JSONB)
     protocol_hash: Mapped[str | None] = mapped_column(String(64))
-    seed: Mapped[str] = mapped_column(String(64))
+    seed: Mapped[str | None] = mapped_column(String(64))  # создаётся при регистрации
     control_share: Mapped[float] = mapped_column(Numeric(4, 3))
+    data_snapshot: Mapped[dict | None] = mapped_column(JSONB)
     registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("app_user.id"))
@@ -162,6 +249,7 @@ class ExperimentResult(Base):
     experiment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("experiment.id"), index=True)
     payload: Mapped[dict] = mapped_column(JSONB)
     result_hash: Mapped[str] = mapped_column(String(64))
+    computed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("app_user.id"))
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -7,7 +7,7 @@
 Деньги храним в копейках (int). Итоговые суммы округляются до копеек через
 Decimal(ROUND_HALF_EVEN).
 
-ДОПУЩЕНИЕ (сверить с таблицей статусов из «Методики замера»):
+Таблица статусов (спецификация, 2.9), проверяется сверху вниз:
   1. в любой группе < min_group_size или MDE > max_mde      → «недостаточно данных»
   2. нижняя граница ДИ прироста возврата > 0 и нижняя граница
      ДИ чистого эффекта в рублях > 0                          → «положительный эффект»
@@ -21,6 +21,7 @@ Decimal(ROUND_HALF_EVEN).
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import asdict, dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import StrEnum
@@ -35,11 +36,20 @@ _CHUNK = 250
 
 
 class Status(StrEnum):
-    INSUFFICIENT = "недостаточно данных"
-    POSITIVE = "положительный эффект"
-    NOT_PAYING_OFF = "эффект есть, окупаемость не доказана"
-    NEGATIVE = "отрицательный эффект"
-    NOT_DETECTED = "эффект не обнаружен"
+    INSUFFICIENT = "insufficient"
+    POSITIVE = "positive"
+    NOT_PAYING_OFF = "not_paying_off"
+    NEGATIVE = "negative"
+    NOT_DETECTED = "not_detected"
+
+
+STATUS_LABEL: dict[Status, str] = {
+    Status.INSUFFICIENT: "недостаточно данных",
+    Status.POSITIVE: "положительный эффект",
+    Status.NOT_PAYING_OFF: "эффект есть, окупаемость не доказана",
+    Status.NEGATIVE: "отрицательный эффект",
+    Status.NOT_DETECTED: "эффект не обнаружен",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,17 +67,27 @@ class EffectResult:
     rate_control: float
     rate_test: float
     uplift: float
-    uplift_ci: tuple[float, float]
-    mde: float
+    uplift_ci: tuple[float, float] | None
+    mde: float | None
     net_effect_kopecks: int
-    net_effect_ci_kopecks: tuple[int, int]
+    net_effect_ci_kopecks: tuple[int, int] | None
     cost_kopecks: int
     iterations: int
     bootstrap_seed: int
+    alpha: float = 0.05
+    revenue_control_kopecks: int = 0
+    revenue_test_kopecks: int = 0
+    rate_control_ci: tuple[float, float] | None = None
+    rate_test_ci: tuple[float, float] | None = None
+    by_stratum: dict[str, dict[str, dict[str, float | int]]] | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["status"] = self.status.value
+        d["status_label"] = STATUS_LABEL[self.status]
+        for k, v in list(d.items()):  # JSON не допускает NaN/inf
+            if isinstance(v, float) and not math.isfinite(v):
+                d[k] = None
         return d
 
 
@@ -100,12 +120,17 @@ def estimate_effect(
     seed: str,
     cost_kopecks: int,
     baseline_rate: float | None = None,
+    strata: dict[str, str] | None = None,
     iterations: int = BOOTSTRAP_ITERATIONS,
     alpha: float = 0.05,
     min_group_size: int = 100,
     max_mde: float = 0.10,
 ) -> EffectResult:
-    """Считает эффект. Клиент без исхода считается невернувшимся с выручкой 0."""
+    """Считает эффект. Клиент без исхода считается невернувшимся с выручкой 0.
+
+    Выручка клиента может быть отрицательной (возвраты в окне).
+    strata — только для показа разбивки by_stratum, на расчёт не влияет.
+    """
     by_id = {o.customer_id: o for o in outcomes}
     groups: dict[str, list[Outcome]] = {CONTROL: [], TEST: []}
     for cid in sorted(assignment):
@@ -125,7 +150,10 @@ def estimate_effect(
     rate_t = float(rt.mean()) if n_t else 0.0
     uplift = rate_t - rate_c
 
-    p0 = baseline_rate if baseline_rate is not None else rate_c
+    rev_c_total, rev_t_total = int(vc.sum()), int(vt.sum())
+    by_stratum = _by_stratum(assignment, by_id, strata) if strata else None
+
+    p0 = baseline_rate if baseline_rate is not None else 0.05
     p0 = min(max(p0, 0.01), 0.99)
     mde = mde_two_proportions(p0, n_c, n_t, alpha=alpha)
 
@@ -133,8 +161,9 @@ def estimate_effect(
     if n_c < min_group_size or n_t < min_group_size or mde > max_mde:
         net = _kopecks(((vt.mean() if n_t else 0) - (vc.mean() if n_c else 0)) * n_t - cost_kopecks)
         return EffectResult(
-            Status.INSUFFICIENT, n_c, n_t, rate_c, rate_t, uplift, (float("nan"), float("nan")),
-            mde, net, (net, net), cost_kopecks, 0, b_seed,
+            Status.INSUFFICIENT, n_c, n_t, rate_c, rate_t, uplift, None,
+            mde if math.isfinite(mde) else None, net, None, cost_kopecks, 0, b_seed,
+            alpha, rev_c_total, rev_t_total, None, None, by_stratum,
         )
 
     rng = np.random.Generator(np.random.PCG64(b_seed))
@@ -145,6 +174,8 @@ def estimate_effect(
 
     lo_q, hi_q = 100 * alpha / 2, 100 * (1 - alpha / 2)
     u_lo, u_hi = (float(x) for x in np.percentile(uplift_b, [lo_q, hi_q]))
+    rc_lo, rc_hi = (float(x) for x in np.percentile(rate_c_b, [lo_q, hi_q]))
+    rt_lo, rt_hi = (float(x) for x in np.percentile(rate_t_b, [lo_q, hi_q]))
     n_lo, n_hi = (_kopecks(x) for x in np.percentile(net_b, [lo_q, hi_q]))
     net = _kopecks((vt.mean() - vc.mean()) * n_t - cost_kopecks)
 
@@ -159,5 +190,23 @@ def estimate_effect(
 
     return EffectResult(
         status, n_c, n_t, rate_c, rate_t, uplift, (u_lo, u_hi), mde, net, (n_lo, n_hi),
-        cost_kopecks, iterations, b_seed,
+        cost_kopecks, iterations, b_seed, alpha, rev_c_total, rev_t_total,
+        (rc_lo, rc_hi), (rt_lo, rt_hi), by_stratum,
     )
+
+
+def _by_stratum(
+    assignment: dict[str, str], by_id: dict[str, Outcome], strata: dict[str, str]
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    acc: dict[str, dict[str, list[int]]] = {}
+    for cid in sorted(assignment):
+        s = strata.get(cid, "?")
+        g = assignment[cid]
+        o = by_id.get(cid)
+        cell = acc.setdefault(s, {CONTROL: [0, 0], TEST: [0, 0]})[g]
+        cell[0] += 1
+        cell[1] += 1 if o and o.returned else 0
+    return {
+        s: {g: {"n": n, "rate": round(r / n, 6) if n else 0.0} for g, (n, r) in groups.items()}
+        for s, groups in sorted(acc.items())
+    }

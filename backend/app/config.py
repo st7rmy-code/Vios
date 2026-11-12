@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     s3_bucket: str = "sverka-imports"
     storage_backend: str = "s3"  # s3 | memory (тесты)
 
-    max_upload_bytes: int = 20 * 1024 * 1024
+    max_upload_bytes: int = 50 * 1024 * 1024
+    audit_anchor_prefix: str = "audit-anchors"
 
 
 @lru_cache
