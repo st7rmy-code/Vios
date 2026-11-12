@@ -1,6 +1,4 @@
-"""Импорт CSV: разбор, валидация, отчёт о качестве, блокировка ПДн.
-
-ВРЕМЕННО: контракт ниже — допущение до получения раздела «Данные и импорт».
+"""Импорт CSV: разбор, валидация, отчёт о качестве, блокировка ПДн (спецификация, раздел 3).
 
 Чистая часть (parse_csv) не трогает БД и хранилище: на вход байты, на выход
 строки и отчёт. Файл с ФИО, телефонами или email отклоняется целиком, в отчёт
@@ -22,20 +20,45 @@ from app.models import ImportKind
 
 CONTRACT: dict[ImportKind, dict[str, list[str]]] = {
     ImportKind.customers: {
-        "required": ["customer_id", "first_paid_at"],
-        "optional": ["branch", "subscription_ends_at"],
+        "required": ["customer_id"],
+        "optional": ["branch", "first_paid_at", "subscription_ends_at", "frozen_until"],
     },
     ImportKind.payments: {
         "required": ["payment_id", "customer_id", "paid_at", "amount"],
-        "optional": ["branch", "method"],
+        "optional": ["operation", "method", "branch"],
     },
     ImportKind.visits: {
         "required": ["customer_id", "visited_at"],
         "optional": ["branch"],
     },
+    ImportKind.obligations: {
+        "required": ["obligation_id", "customer_id", "kind", "starts_at"],
+        "optional": ["ends_at", "visits_total", "visits_used", "amount", "status", "frozen_from", "frozen_until",
+                     "branch"],
+    },
 }
-DATE_COLUMNS = {"first_paid_at", "subscription_ends_at", "paid_at", "visited_at"}
+DATE_COLUMNS = {"first_paid_at", "subscription_ends_at", "frozen_until", "paid_at", "visited_at", "starts_at",
+                "ends_at", "frozen_from"}
+# Даты, которые по смыслу могут быть в будущем (срок абонемента, заморозки)
+FUTURE_OK = {"subscription_ends_at", "frozen_until", "ends_at", "frozen_from", "starts_at"}
+INT_COLUMNS = {"visits_total", "visits_used"}
+ENUMS: dict[str, tuple[str, ...]] = {
+    "operation": ("payment", "refund"),
+    "method": ("cash", "card", "transfer", "online", "other"),
+    "kind": ("subscription", "package", "prepayment", "debt"),
+    "status": ("active", "frozen", "closed", "cancelled"),
+}
+DEFAULTS = {"operation": "payment", "status": "active"}
+KEY: dict[ImportKind, tuple[str, ...]] = {
+    ImportKind.customers: ("customer_id",),
+    ImportKind.payments: ("payment_id",),
+    ImportKind.visits: ("customer_id", "visited_at", "branch"),
+    ImportKind.obligations: ("obligation_id",),
+}
 MAX_ERRORS_IN_REPORT = 100
+MAX_ROWS = 500_000
+REJECT_BELOW = 0.80
+WARN_BELOW = 0.95
 
 _PII_HEADER = re.compile(
     r"(фио|фамил|имя|отчеств|клиент_?имя|name|phone|телефон|^тел|mobile|моб|e-?mail|почт|mail|паспорт|snils|снилс|адрес|address|birth|рожд)",
@@ -119,7 +142,8 @@ def detect_pii_columns(headers: list[str], sample_rows: list[dict[str, str]]) ->
     return found
 
 
-def parse_csv(data: bytes, kind: ImportKind) -> ParseResult:
+def parse_csv(data: bytes, kind: ImportKind, today: date | None = None) -> ParseResult:
+    """today — дата «сегодня» бизнеса для проверки дат в будущем (None — не проверять)."""
     digest = sha256_bytes(data)
     res = ParseResult(kind=kind, sha256=digest, size_bytes=len(data), accepted=False)
     report: dict[str, Any] = {
@@ -127,6 +151,7 @@ def parse_csv(data: bytes, kind: ImportKind) -> ParseResult:
         "sha256": digest,
         "size_bytes": len(data),
         "blocking": [],
+        "warnings": [],
         "pii_columns": {},
         "rows_total": 0,
         "rows_valid": 0,
@@ -136,6 +161,7 @@ def parse_csv(data: bytes, kind: ImportKind) -> ParseResult:
         "errors_truncated": False,
         "missing_required_columns": [],
         "unknown_columns": [],
+        "orphan_customers": 0,
     }
     res.report = report
 
@@ -159,6 +185,10 @@ def parse_csv(data: bytes, kind: ImportKind) -> ParseResult:
     raw_headers = reader.fieldnames or []
     headers = [_norm_header(h) for h in raw_headers]
     rows_raw = [{_norm_header(k): (v or "") for k, v in r.items() if k is not None} for r in reader]
+    if len(rows_raw) > MAX_ROWS:
+        report["rows_total"] = len(rows_raw)
+        report["blocking"].append(f"больше {MAX_ROWS:,} строк в одном файле, разбейте его на части".replace(",", " "))
+        return res
 
     pii = detect_pii_columns(headers, rows_raw[:500])
     if pii:
@@ -189,6 +219,8 @@ def parse_csv(data: bytes, kind: ImportKind) -> ParseResult:
     def err(line: int, column: str | None, code: str, message: str) -> None:
         errors.append({"line": line, "column": column, "code": code, "message": message})
 
+    collapsed = 0
+    debt_total = 0
     for i, r in enumerate(rows_raw, start=2):  # строка 1 — заголовок
         out: dict[str, Any] = {}
         ok = True
@@ -198,15 +230,26 @@ def parse_csv(data: bytes, kind: ImportKind) -> ParseResult:
                 if col in contract["required"]:
                     err(i, col, "empty", "пустое обязательное поле")
                     ok = False
-                out[col] = None
+                out[col] = DEFAULTS.get(col) if col in ENUMS else None
                 continue
             try:
                 if col in DATE_COLUMNS:
                     out[col] = parse_date(v)
+                    if today is not None and col not in FUTURE_OK and out[col] > today:
+                        raise ValueError("дата в будущем")
                 elif col == "amount":
                     out[col] = parse_amount_kopecks(v)
                     if out[col] <= 0:
                         raise ValueError("сумма должна быть больше нуля")
+                elif col in INT_COLUMNS:
+                    if not v.isdigit():
+                        raise ValueError("ожидается целое число ≥ 0")
+                    out[col] = int(v)
+                elif col in ENUMS:
+                    lv = v.lower()
+                    if lv not in ENUMS[col]:
+                        raise ValueError("допустимо: " + ", ".join(ENUMS[col]))
+                    out[col] = lv
                 else:
                     if len(v) > 100:
                         raise ValueError("значение длиннее 100 символов")
@@ -214,29 +257,42 @@ def parse_csv(data: bytes, kind: ImportKind) -> ParseResult:
             except ValueError as e:
                 err(i, col, "invalid", str(e))
                 ok = False
+        if ok and kind is ImportKind.obligations:
+            if out.get("ends_at") and out["ends_at"] < out["starts_at"]:
+                err(i, "ends_at", "invalid", "конец раньше начала")
+                ok = False
+            elif out.get("frozen_from") and out.get("frozen_until") and out["frozen_until"] < out["frozen_from"]:
+                err(i, "frozen_until", "invalid", "конец заморозки раньше начала")
+                ok = False
         if not ok:
             continue
-        key = (
-            (out["payment_id"],) if kind is ImportKind.payments
-            else (out["customer_id"],) if kind is ImportKind.customers
-            else (out["customer_id"], out["visited_at"])
-        )
+        key = tuple(out.get(k) for k in KEY[kind])
         if key in seen_keys:
+            if kind is ImportKind.visits:  # несколько посещений в день схлопываются в одно
+                collapsed += 1
+                continue
             report["duplicates"] += 1
-            err(i, None, "duplicate", "повтор строки по ключу " + "/".join(map(str, key)))
+            err(i, None, "duplicate", "повтор строки по ключу " + "/".join(str(k) for k in key if k is not None))
             continue
         seen_keys.add(key)
         valid.append(out)
         customers.add(out["customer_id"])
         for col in DATE_COLUMNS & out.keys():
-            if out[col]:
+            if out[col] and col not in FUTURE_OK:
                 dates.append(out[col])
+        if kind is ImportKind.obligations and out["kind"] == "debt" and out.get("amount"):
+            debt_total += out["amount"]
         if kind is ImportKind.payments:
-            total_amount += out["amount"]
+            total_amount += out["amount"] if out["operation"] == "payment" else -out["amount"]
 
     report["rows_total"] = len(rows_raw)
-    report["rows_valid"] = len(valid)
-    report["rows_invalid"] = len(rows_raw) - len(valid)
+    n_ok = len(valid) + collapsed
+    report["rows_valid"] = n_ok
+    report["rows_invalid"] = len(rows_raw) - n_ok
+    if kind is ImportKind.visits:
+        report["visits_collapsed"] = collapsed
+    if kind is ImportKind.obligations:
+        report["debt_kopecks"] = debt_total
     report["errors"] = errors[:MAX_ERRORS_IN_REPORT]
     report["errors_truncated"] = len(errors) > MAX_ERRORS_IN_REPORT
     report["customers"] = len(customers)
@@ -244,10 +300,18 @@ def parse_csv(data: bytes, kind: ImportKind) -> ParseResult:
     report["date_max"] = max(dates).isoformat() if dates else None
     if kind is ImportKind.payments:
         report["total_amount_kopecks"] = total_amount
-    report["valid_share"] = round(len(valid) / len(rows_raw), 4) if rows_raw else 0.0
+    share = n_ok / len(rows_raw) if rows_raw else 0.0
+    report["valid_share"] = round(share, 4)
     if not valid:
         report["blocking"].append("нет ни одной корректной строки")
         return res
+    if share < REJECT_BELOW:
+        report["blocking"].append(
+            f"корректных строк {share:.0%}, нужно не меньше {REJECT_BELOW:.0%}: исправьте ошибки и загрузите снова"
+        )
+        return res
+    if share < WARN_BELOW:
+        report["warnings"].append(f"корректных строк {share:.0%}: строки с ошибками пропущены")
 
     res.accepted = True
     res.rows = valid

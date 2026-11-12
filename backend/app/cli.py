@@ -1,4 +1,8 @@
-"""Первый администратор: python -m app.cli create-admin <login> <password>."""
+"""Команды обслуживания.
+
+    python -m app.cli create-admin <login> <password>   первый администратор
+    python -m app.cli anchor-audit                      суточный якорь журнала в S3
+"""
 
 import sys
 
@@ -9,8 +13,14 @@ from app.services import audit
 
 
 def main() -> None:
+    if len(sys.argv) == 2 and sys.argv[1] == "anchor-audit":
+        from app.services.anchor import write_anchor
+
+        with get_sessionmaker()() as db:
+            print(write_anchor(db))
+        return
     if len(sys.argv) != 4 or sys.argv[1] != "create-admin":
-        sys.exit("usage: python -m app.cli create-admin <login> <password>")
+        sys.exit("usage: python -m app.cli create-admin <login> <password> | anchor-audit")
     with get_sessionmaker()() as db:
         u = User(login=sys.argv[2], password_hash=hash_password(sys.argv[3]), role=Role.admin)
         db.add(u)

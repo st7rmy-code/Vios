@@ -17,6 +17,8 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app import clock
+
 from app.models import AuditLog
 
 GENESIS = "0" * 64
@@ -64,7 +66,7 @@ def append(
     prev_hash = last.hash if last else GENESIS
     row = AuditLog(
         seq=(last.seq + 1) if last else 1,
-        occurred_at=datetime.now(UTC),
+        occurred_at=clock.now(),
         business_id=business_id,
         actor_id=actor_id,
         action=action,
@@ -86,6 +88,7 @@ class ChainCheck:
     checked: int
     broken_at_seq: int | None = None
     reason: str | None = None
+    last_hash: str | None = None
 
 
 def verify_chain(session: Session) -> ChainCheck:
@@ -102,4 +105,4 @@ def verify_chain(session: Session) -> ChainCheck:
         prev = row.hash
         expected_seq += 1
         n += 1
-    return ChainCheck(True, n)
+    return ChainCheck(True, n, last_hash=prev if n else None)

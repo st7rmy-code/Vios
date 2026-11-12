@@ -25,6 +25,9 @@ def test_positive_effect_2000_churned():
     assert r.status is Status.POSITIVE, r
     assert r.uplift_ci[0] > 0
     assert r.net_effect_ci_kopecks[0] > 0
+    d = r.to_dict()
+    assert d["status"] == "positive" and d["status_label"] == "положительный эффект"
+    assert d["revenue_test_kopecks"] > d["revenue_control_kopecks"]
 
 
 def test_no_effect_in_at_least_90_of_100_simulations():
@@ -40,6 +43,11 @@ def test_150_customers_insufficient():
     a, o = run_business(150, 0.05, 0.11, sim_seed=3, exp_seed="small")
     r = estimate_effect(a, o, seed="small", cost_kopecks=C)
     assert r.status is Status.INSUFFICIENT
+    d = r.to_dict()
+    assert d["uplift_ci"] is None and d["net_effect_ci_kopecks"] is None
+    import json
+
+    json.dumps(d, allow_nan=False)  # в ответе нет NaN
 
 
 def test_recalculation_is_identical():
@@ -80,3 +88,39 @@ def test_cohort_rule():
     ancient = Customer("c", date(2020, 1, 1), date(2021, 1, 1), date(2021, 1, 1), 100)
     never_paid = Customer("d", None, date(2026, 8, 1), None, 0)
     assert [c.customer_id for c in select_cohort([active, churned, ancient, never_paid], rule)] == ["b"]
+
+
+def test_cohort_exclusions():
+    from app.stats import cohort_with_exclusions
+
+    rule = CohortRule(as_of=date(2026, 10, 1))
+    base = dict(first_paid_at=date(2025, 1, 1), last_visit_at=date(2026, 8, 1),
+                subscription_ends_at=date(2026, 8, 1), total_paid_kopecks=100)
+    ok = Customer("ok", **base)
+    frozen = Customer("fz", **base, frozen=True)
+    package = Customer("pk", **base, active_obligation=True)
+    busy = Customer("ox", **base, in_other_experiment=True)
+    refunded = Customer("rf", **{**base, "total_paid_kopecks": 0})
+    cohort, excluded = cohort_with_exclusions([ok, frozen, package, busy, refunded], rule)
+    assert [c.customer_id for c in cohort] == ["ok"]
+    assert excluded == {"active_obligation": 1, "frozen": 1, "no_payments": 1, "other_experiment": 1}
+
+
+def test_strata_branch_and_small_merge():
+    from app.stats import assign_strata
+
+    rule = CohortRule(as_of=date(2026, 10, 1))
+    cs = []
+    for i in range(60):  # крупная страта в «Центре»
+        cs.append(Customer(f"a{i}", date(2025, 1, 1), None, date(2026, 8, 1), 500_000, "Центр"))
+    for i in range(5):  # крошечные страты в «Севере»
+        cs.append(Customer(f"b{i}", date(2026, 7, 1), None, date(2026, 8, 1), 5_000_000, "Север"))
+    for i in range(25):
+        cs.append(Customer(f"c{i}", date(2025, 1, 1), None, date(2026, 8, 1), 500_000, "Север"))
+    st = assign_strata(cs, rule)
+    assert st["a0"] == "bЦентр-t2-p0"
+    assert st["c0"] == "bСевер-t2-p0"
+    assert st["b0"] == "small"  # «Север-small» из 5 < 20 → общая small
+
+    single = assign_strata([Customer(f"x{i}", date(2025, 1, 1), None, None, 100, "Центр") for i in range(30)], rule)
+    assert set(single.values()) == {"t2-p0"}  # один филиал — признак не используется

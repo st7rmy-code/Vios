@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 import numpy as np
 
-from app.stats import CohortRule, Customer, Outcome, assign_groups, select_cohort, stratum_of
+from app.stats import CohortRule, Customer, Outcome, assign_groups, assign_strata, select_cohort
 
 AS_OF = date(2026, 10, 1)
 RULE = CohortRule(as_of=AS_OF)
@@ -34,9 +34,7 @@ def make_churned_customers(n: int, rng_seed: int = 7) -> list[Customer]:
 
 def run_business(n: int, p_control: float, p_test: float, sim_seed: int, exp_seed: str):
     customers = select_cohort(make_churned_customers(n, rng_seed=sim_seed), RULE)
-    assignment = assign_groups(
-        ((c.customer_id, stratum_of(c, RULE)) for c in customers), exp_seed, "0.5"
-    )
+    assignment = assign_groups(assign_strata(customers, RULE).items(), exp_seed, "0.5")
     rng = np.random.default_rng(10_000 + sim_seed)
     outcomes = []
     for cid in sorted(assignment):

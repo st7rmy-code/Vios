@@ -7,3 +7,5 @@ node_modules/
 .next/
 build/
 *.egg-info/
+.shots/
+*.tsbuildinfo

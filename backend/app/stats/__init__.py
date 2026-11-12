@@ -6,12 +6,15 @@
 """
 
 from app.stats.assignment import assign_groups, hmac_unit
-from app.stats.cohort import CohortRule, Customer, select_cohort
-from app.stats.estimate import EffectResult, Outcome, Status, estimate_effect
+from app.stats.cohort import CohortRule, Customer, cohort_with_exclusions, select_cohort
+from app.stats.estimate import STATUS_LABEL, EffectResult, Outcome, Status, estimate_effect
 from app.stats.mde import mde_two_proportions
-from app.stats.strata import stratum_of
+from app.stats.strata import assign_strata, stratum_of
 
 __all__ = [
+    "STATUS_LABEL",
+    "assign_strata",
+    "cohort_with_exclusions",
     "CohortRule",
     "Customer",
     "EffectResult",
