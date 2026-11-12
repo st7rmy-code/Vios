@@ -4,15 +4,19 @@
 клиентов и честно считаем, сколько денег это принесло, с контрольной группой.
 
 * `backend/` — Python 3.12, FastAPI, SQLAlchemy 2, Alembic, PostgreSQL, Pydantic v2.
-* `frontend/` — пока пусто (шаг 2).
-* `docker-compose.yml` — Postgres 16, MinIO (S3) и бэкенд.
+* `frontend/` — Next.js 15, TypeScript, Tailwind, shadcn/ui, Recharts; клиент API из `backend/openapi.json`.
+* `docker-compose.yml` — Postgres 16, MinIO (S3), бэкенд и фронтенд.
 
 ## Запуск
 
 ```bash
 docker compose up --build
 docker compose exec backend python -m app.cli create-admin admin <пароль>
-# API: http://localhost:8000/docs, OpenAPI: http://localhost:8000/openapi.json
+# Интерфейс: http://localhost:3000, API: http://localhost:8000/docs
+
+# Демо: бизнес, собственник owner/owner-pass, исполнитель coach/coach-pass,
+# 2 000 ушедших клиентов и закрытый эксперимент с результатом
+docker compose exec backend python scripts/demo.py http://localhost:8000 admin <пароль>
 ```
 
 ## Тесты

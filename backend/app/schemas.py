@@ -152,3 +152,23 @@ class ChainOut(BaseModel):
     checked: int
     broken_at_seq: int | None
     reason: str | None
+
+
+class CertificateAuditEntry(BaseModel):
+    seq: int
+    action: str
+    occurred_at: datetime
+    hash: str
+
+
+class CertificateOut(BaseModel):
+    experiment_id: uuid.UUID
+    title: str
+    protocol: dict[str, Any]
+    protocol_hash: str | None
+    seed: str
+    registered_at: datetime | None
+    closed_at: datetime | None
+    result: dict[str, Any]
+    result_hash: str
+    audit: list[CertificateAuditEntry]
