@@ -298,6 +298,6 @@ def test_audit_anchor_written_to_storage(client, world, db):
     from app.services.anchor import write_anchor
 
     a = write_anchor(db)
-    assert a["key"] == "audit-anchors/2026-11-05.json"
+    assert a["key"] == f"audit-anchors/2026-11-05/090000-seq{a['seq']:012d}.json"
     stored = json.loads(get_storage().get(a["key"]))
     assert stored["hash"] == client.get("/api/v1/audit/verify", headers=world["h"]["owner"]).json()["last_hash"]

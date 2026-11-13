@@ -19,6 +19,8 @@ def write_anchor(db: Session) -> dict:
     last = db.execute(select(AuditLog).order_by(AuditLog.seq.desc()).limit(1)).scalar_one_or_none()
     now = clock.now()
     anchor = {"seq": last.seq if last else 0, "hash": last.hash if last else None, "written_at": now.isoformat()}
-    key = f"{get_settings().audit_anchor_prefix}/{now:%Y-%m-%d}.json"
+    # Ключ уникален для каждого запуска: повторный запуск за день не затирает прежний якорь.
+    # Неизменяемость самих объектов обеспечивает бакет (Object Lock / версионирование).
+    key = f"{get_settings().audit_anchor_prefix}/{now:%Y-%m-%d}/{now:%H%M%S}-seq{anchor['seq']:012d}.json"
     get_storage().put(key, json.dumps(anchor, ensure_ascii=False).encode())
     return {"key": key, **anchor}
