@@ -134,7 +134,13 @@ def estimate_effect(
     Выручка клиента может быть отрицательной (возвраты в окне).
     strata — только для показа разбивки by_stratum, на расчёт не влияет.
     """
-    by_id = {o.customer_id: o for o in outcomes}
+    by_id: dict[str, Outcome] = {}
+    for o in outcomes:
+        if o.customer_id in by_id:
+            raise ValueError(f"повтор исхода для customer_id: {o.customer_id}")
+        if o.customer_id not in assignment:
+            raise ValueError(f"исход для клиента вне деления: {o.customer_id}")
+        by_id[o.customer_id] = o
     groups: dict[str, list[Outcome]] = {CONTROL: [], TEST: []}
     for cid in sorted(assignment):
         groups[assignment[cid]].append(by_id.get(cid, Outcome(cid, False, 0)))

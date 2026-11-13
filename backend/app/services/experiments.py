@@ -86,12 +86,14 @@ def load_customers(
             Payment.customer_external_id,
             func.sum(_signed_amount()),
             func.min(case((Payment.operation == PaymentOperation.payment, Payment.paid_at))),
+            func.max(case((Payment.operation == PaymentOperation.payment, Payment.paid_at))),
         )
         .where(Payment.business_id == business_id, Payment.paid_at <= as_of)
         .group_by(Payment.customer_external_id)
     ).all()
-    net_paid = {cid: int(total or 0) for cid, total, _ in pay_rows}
-    first_paid = {cid: first for cid, _, first in pay_rows}
+    net_paid = {cid: int(total or 0) for cid, total, _, _ in pay_rows}
+    first_paid = {cid: first for cid, _, first, _ in pay_rows}
+    last_paid = {cid: last for cid, _, _, last in pay_rows}
     last_visit = dict(
         db.execute(
             select(Visit.customer_external_id, func.max(Visit.visited_at))
@@ -137,6 +139,7 @@ def load_customers(
                 active_obligation=active,
                 frozen=frozen,
                 in_other_experiment=cid in busy,
+                last_paid_at=last_paid.get(cid),
             )
         )
     return out

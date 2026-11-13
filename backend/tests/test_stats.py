@@ -5,6 +5,7 @@ import pytest
 from app.stats import (
     CohortRule,
     Customer,
+    Outcome,
     Status,
     assign_groups,
     estimate_effect,
@@ -124,3 +125,19 @@ def test_strata_branch_and_small_merge():
 
     single = assign_strata([Customer(f"x{i}", date(2025, 1, 1), None, None, 100, "Центр") for i in range(30)], rule)
     assert set(single.values()) == {"t2-p0"}  # один филиал — признак не используется
+
+
+def test_recent_payment_counts_as_activity():
+    rule = CohortRule(as_of=date(2026, 6, 1), inactive_days=30)
+    gone = Customer("c1", date(2025, 1, 1), date(2026, 3, 1), None, total_paid_kopecks=100)
+    paid_recently = Customer("c2", date(2025, 1, 1), date(2026, 3, 1), None, total_paid_kopecks=100,
+                             last_paid_at=date(2026, 5, 20))
+    assert [c.customer_id for c in select_cohort([gone, paid_recently], rule)] == ["c1"]
+
+
+def test_outcomes_must_match_assignment():
+    a = {"c1": "control", "c2": "test"}
+    with pytest.raises(ValueError, match="повтор"):
+        estimate_effect(a, [Outcome("c1", True, 1), Outcome("c1", False, 0)], seed="s", cost_kopecks=0)
+    with pytest.raises(ValueError, match="вне деления"):
+        estimate_effect(a, [Outcome("c3", True, 1)], seed="s", cost_kopecks=0)
