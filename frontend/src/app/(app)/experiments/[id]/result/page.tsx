@@ -54,7 +54,9 @@ export default function ResultPage() {
     { group: "Тест", rate: r.rate_test, err: ci2err(r.rate_test, r.rate_test_ci), n: r.n_test },
   ];
   const uplift = [{ name: "Прирост", u: r.uplift, err: ci2err(r.uplift, r.uplift_ci) }];
-  const uDomain: [number, number] = r.uplift_ci ? padDomain([r.uplift_ci[0], r.uplift_ci[1], 0, r.mde ?? 0]) : [-0.1, 0.1];
+  const uDomain: [number, number] = r.uplift_ci ? padDomain([r.uplift_ci[0], r.uplift_ci[1], 0]) : [-0.1, 0.1];
+  // уровень доверия из протокола, а не «95%» на все случаи: alpha можно задать от 0.01 до 0.2
+  const ciLabel = `${Math.round((1 - r.alpha) * 100)}% интервал`;
 
   return (
     <div className="space-y-6">
@@ -84,11 +86,11 @@ export default function ResultPage() {
           {!insufficient && (
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="rounded-lg bg-muted p-4">
-                <p className="text-sm text-muted-foreground">Возврат клиентов, 95% интервал</p>
+                <p className="text-sm text-muted-foreground">Возврат клиентов, {ciLabel}</p>
                 <p className="text-xl font-semibold tabular-nums sm:text-2xl">{upliftSentence(r.uplift_ci)}</p>
               </div>
               <div className="rounded-lg bg-muted p-4">
-                <p className="text-sm text-muted-foreground">Чистый эффект после стоимости действия</p>
+                <p className="text-sm text-muted-foreground">Дополнительная выручка за вычетом стоимости действия</p>
                 <p className="text-xl font-semibold tabular-nums sm:text-2xl">
                   {r.net_effect_ci_kopecks
                     ? `от ${kopecksToRub(r.net_effect_ci_kopecks[0])} до ${kopecksToRub(r.net_effect_ci_kopecks[1])}`
@@ -123,7 +125,7 @@ export default function ResultPage() {
           <Card>
             <CardHeader>
               <CardTitle>Доля вернувшихся</CardTitle>
-              <CardDescription>По назначенным группам, включая тех, до кого не дошло действие. Усы — 95% интервал.</CardDescription>
+              <CardDescription>По назначенным группам, включая тех, до кого не дошло действие. Усы — {ciLabel}.</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="h-60" role="img" aria-label={`Контроль ${percent(r.rate_control)}, тест ${percent(r.rate_test)}`}>
@@ -170,14 +172,6 @@ export default function ResultPage() {
                     <YAxis tickFormatter={(v) => pp1(v)} width={72} tickLine={false} axisLine={false} tick={axisTick} domain={uDomain} ticks={niceTicks(uDomain)} />
                     <Tooltip formatter={(v: number) => [pp1(v), "Прирост"]} contentStyle={tooltipStyle} />
                     <ReferenceLine y={0} stroke="hsl(var(--foreground))" strokeOpacity={0.6} />
-                    {r.mde != null && (
-                      <ReferenceLine
-                        y={r.mde}
-                        stroke="hsl(var(--muted-foreground))"
-                        strokeDasharray="5 4"
-                        label={{ value: `MDE ${pp1(r.mde)}`, position: "insideTopRight", fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
-                      />
-                    )}
                     <Scatter dataKey="u" isAnimationActive={false} fill={r.uplift_ci && r.uplift_ci[0] > 0 ? "hsl(var(--success))" : "hsl(var(--primary))"}>
                       <ErrorBar dataKey="err" direction="y" width={10} strokeWidth={2} stroke="hsl(var(--foreground))" />
                     </Scatter>
@@ -204,7 +198,7 @@ export default function ResultPage() {
                 </dd>
                 <Dt>Стоимость действия C</Dt>
                 <dd className="tabular-nums">{kopecksToRub(r.cost_kopecks)}</dd>
-                <Dt>Чистый эффект (точечно)</Dt>
+                <Dt>Доп. выручка минус стоимость (точечно)</Dt>
                 <dd className="tabular-nums">{kopecksToRub(r.net_effect_kopecks)}</dd>
                 <Dt>MDE</Dt>
                 <dd className="tabular-nums">{r.mde != null ? pp1(r.mde) : "—"}</dd>
@@ -265,8 +259,9 @@ function Dt({ children }: { children: React.ReactNode }) {
   return <dt className="text-muted-foreground">{children}</dt>;
 }
 
-function ci2err(point: number, ci: [number, number] | null): [number, number] {
-  return ci ? [Math.max(point - ci[0], 0), Math.max(ci[1] - point, 0)] : [0, 0];
+/** Нет интервала — нет усов: нулевые усы выглядели бы как абсолютно точная оценка. */
+function ci2err(point: number, ci: [number, number] | null): [number, number] | undefined {
+  return ci ? [Math.max(point - ci[0], 0), Math.max(ci[1] - point, 0)] : undefined;
 }
 
 /** Границы оси прироста, кратные шагу: 1, 2 или 5 п.п. */

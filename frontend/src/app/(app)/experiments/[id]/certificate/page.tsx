@@ -65,9 +65,9 @@ export default function CertificatePage() {
           <p className="mx-auto max-w-xl text-sm text-muted-foreground">{st.explain}</p>
           {r.status !== "insufficient" && (
             <div className="grid gap-3 sm:grid-cols-2">
-              <Big label="Возврат клиентов, 95% интервал" value={upliftSentence(r.uplift_ci)} />
+              <Big label={`Возврат клиентов, ${Math.round((1 - r.alpha) * 100)}% интервал`} value={upliftSentence(r.uplift_ci)} />
               <Big
-                label="Чистый эффект после стоимости действия"
+                label="Дополнительная выручка за вычетом стоимости действия"
                 value={
                   r.net_effect_ci_kopecks
                     ? `от ${kopecksToRub(r.net_effect_ci_kopecks[0])} до ${kopecksToRub(r.net_effect_ci_kopecks[1])}`
@@ -101,7 +101,7 @@ export default function CertificatePage() {
             <dd>{rubString(p.cost_rub)}</dd>
             <Dt>Метод</Dt>
             <dd>
-              деление HMAC-SHA256 по seed внутри страт, расчёт по назначенным группам, бутстрэп {num(r.iterations)} повторов, 95%
+              деление HMAC-SHA256 по seed внутри страт, расчёт по назначенным группам, бутстрэп {num(r.iterations)} повторов, {Math.round((1 - r.alpha) * 100)}%
               интервал
             </dd>
           </dl>
