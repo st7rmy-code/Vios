@@ -63,6 +63,8 @@ def _out(db: Session, user: User, exp: Experiment) -> ExperimentOut:
     if not _control_visible(user, exp):
         out.n_control = None
         out.control_share = None
+        # по seed и списку клиентов исполнитель восстановил бы контрольную группу
+        out.seed = None
         out.protocol = {k: v for k, v in out.protocol.items() if k not in HIDDEN_FROM_EXECUTOR}
     if user.role is Role.executor:
         out.data_snapshot = None

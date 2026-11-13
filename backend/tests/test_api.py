@@ -154,7 +154,8 @@ def test_executor_sees_test_group_only_until_close(client, world, clock_at):
     assert client.get(f"/api/v1/experiments/{eid}/assignments?group=control", headers=ex).status_code == 403
     assert client.get(f"/api/v1/experiments/{eid}/assignments.csv?group=control", headers=ex).status_code == 403
     card = client.get(f"/api/v1/experiments/{eid}", headers=ex).json()
-    assert card["n_control"] is None and card["control_share"] is None
+    assert card["n_control"] is None and card["control_share"] is None and card["seed"] is None
+    assert all(e["seed"] is None for e in client.get("/api/v1/experiments", headers=ex).json())
     assert "control_share" not in card["protocol"] and "cost_rub" not in card["protocol"]
     assert client.get(f"/api/v1/experiments/{eid}/result", headers=ex).status_code == 403
     assert client.post(f"/api/v1/experiments/{eid}/close", headers=ex).status_code == 403

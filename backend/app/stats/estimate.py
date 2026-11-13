@@ -33,6 +33,8 @@ from app.stats.mde import mde_two_proportions
 
 BOOTSTRAP_ITERATIONS = 5000
 _CHUNK = 250
+# предел элементов в одной матрице индексов: при n=200 тыс. 250 строк заняли бы ~400 МБ
+_MAX_CELLS = 5_000_000
 
 
 class Status(StrEnum):
@@ -103,10 +105,11 @@ def _bootstrap_means(
     rng: np.random.Generator, returned: np.ndarray, revenue: np.ndarray, iterations: int
 ) -> tuple[np.ndarray, np.ndarray]:
     n = returned.shape[0]
+    chunk = max(1, min(_CHUNK, _MAX_CELLS // max(n, 1)))
     rates = np.empty(iterations)
     revs = np.empty(iterations)
-    for start in range(0, iterations, _CHUNK):
-        size = min(_CHUNK, iterations - start)
+    for start in range(0, iterations, chunk):
+        size = min(chunk, iterations - start)
         idx = rng.integers(0, n, size=(size, n))
         rates[start : start + size] = returned[idx].mean(axis=1)
         revs[start : start + size] = revenue[idx].mean(axis=1)
