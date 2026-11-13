@@ -43,8 +43,10 @@ def _control_visible(user: User, exp: Experiment) -> bool:
     return user.role in MANAGERS or exp.status is ExperimentStatus.closed
 
 
-def _get(db: Session, user: User, exp_id: uuid.UUID) -> Experiment:
-    exp = db.get(Experiment, exp_id)
+def _get(db: Session, user: User, exp_id: uuid.UUID, lock: bool = False) -> Experiment:
+    # lock=True: SELECT … FOR UPDATE, чтобы два параллельных запроса не зарегистрировали,
+    # не закрыли и не посчитали один эксперимент дважды
+    exp = db.get(Experiment, exp_id, with_for_update=lock)
     if exp is None:
         raise ApiError(404, "Не найдено", "not_found")
     check_business(user, exp.business_id)
@@ -112,7 +114,7 @@ def get_experiment(exp_id: uuid.UUID, db: Session = Depends(get_session),
 @router.patch("/experiments/{exp_id}", response_model=ExperimentOut, operation_id="updateExperiment")
 def update(exp_id: uuid.UUID, body: ExperimentUpdate, db: Session = Depends(get_session),
            user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.update(db, user, exp, body.title, body.protocol)
     db.commit()
     return _out(db, user, exp)
@@ -121,7 +123,7 @@ def update(exp_id: uuid.UUID, body: ExperimentUpdate, db: Session = Depends(get_
 @router.delete("/experiments/{exp_id}", status_code=204, operation_id="deleteExperiment")
 def delete(exp_id: uuid.UUID, db: Session = Depends(get_session),
            user: User = Depends(require(*MANAGERS))) -> Response:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.delete(db, user, exp)
     db.commit()
     return Response(status_code=204)
@@ -130,7 +132,7 @@ def delete(exp_id: uuid.UUID, db: Session = Depends(get_session),
 @router.post("/experiments/{exp_id}/register", response_model=ExperimentOut, operation_id="registerExperiment")
 def register(exp_id: uuid.UUID, db: Session = Depends(get_session),
              user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.register(db, user, exp)
     db.commit()
     return _out(db, user, exp)
@@ -139,7 +141,7 @@ def register(exp_id: uuid.UUID, db: Session = Depends(get_session),
 @router.post("/experiments/{exp_id}/close", response_model=ExperimentOut, operation_id="closeExperiment")
 def close(exp_id: uuid.UUID, db: Session = Depends(get_session),
           user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.close(db, user, exp)
     db.commit()
     return _out(db, user, exp)
@@ -186,7 +188,7 @@ def export_assignments(exp_id: uuid.UUID, group: Literal["test", "control"] = "t
 @router.post("/experiments/{exp_id}/calculate", response_model=ResultOut, operation_id="calculateResult")
 def calculate(exp_id: uuid.UUID, db: Session = Depends(get_session),
               user: User = Depends(require(*MANAGERS))) -> ResultOut:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     res = svc.calculate(db, user, exp)
     db.commit()
     return ResultOut(experiment_id=exp.id, computed_at=res.computed_at, result_hash=res.result_hash,

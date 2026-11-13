@@ -301,3 +301,14 @@ def test_audit_anchor_written_to_storage(client, world, db):
     assert a["key"] == f"audit-anchors/2026-11-05/090000-seq{a['seq']:012d}.json"
     stored = json.loads(get_storage().get(a["key"]))
     assert stored["hash"] == client.get("/api/v1/audit/verify", headers=world["h"]["owner"]).json()["last_hash"]
+
+
+def test_login_locked_after_repeated_failures(client, world):
+    h = world["h"]["owner"]
+    r = client.post("/api/v1/users", headers=h, json={"login": "coach3", "password": "coach3-pass",
+                                                       "role": "executor"})
+    assert r.status_code == 201, r.text
+    for _ in range(5):
+        assert client.post("/api/v1/auth/token", data={"username": "coach3", "password": "wrong"}).status_code == 401
+    r = client.post("/api/v1/auth/token", data={"username": "coach3", "password": "coach3-pass"})
+    assert r.status_code == 429 and r.json()["code"] == "too_many_attempts"
