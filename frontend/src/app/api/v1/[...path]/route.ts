@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import type { NextRequest } from "next/server";
 
-import { BACKEND_URL, TOKEN_COOKIE } from "@/lib/backend";
+import { BACKEND_URL, TOKEN_COOKIE, forbidden, isSameOriginMutation } from "@/lib/backend";
 
 export const dynamic = "force-dynamic";
 
@@ -10,7 +10,12 @@ export const dynamic = "force-dynamic";
  * здесь он превращается в заголовок Authorization.
  */
 async function proxy(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
+  if (!isSameOriginMutation(req)) return forbidden();
   const { path } = await params;
+  // «..» и «.» encodeURIComponent не кодирует: fetch нормализовал бы путь и вышел за /api/v1/
+  if (path.some((p) => p === ".." || p === "." || p === "")) {
+    return Response.json({ detail: "Не найдено", code: "not_found" }, { status: 404 });
+  }
   const url = `${BACKEND_URL}/api/v1/${path.map(encodeURIComponent).join("/")}${req.nextUrl.search}`;
   const headers = new Headers();
   for (const h of ["content-type", "accept"]) {
