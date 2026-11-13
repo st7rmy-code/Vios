@@ -32,7 +32,7 @@ function LoginForm() {
       return setError(errorText(await res.json().catch(() => null)));
     }
     const me = await (await fetch("/api/v1/auth/me")).json();
-    const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : null;
+    const safeNext = sameSitePath(next);
     router.replace(safeNext ?? (me.role === "executor" ? "/experiments" : "/"));
   }
 
@@ -59,6 +59,17 @@ function LoginForm() {
       </Button>
     </form>
   );
+}
+
+/** Путь для возврата после входа: только внутри этого сайта («/\\evil.com» и «//evil.com» отсекаются). */
+function sameSitePath(next: string | null): string | null {
+  if (!next || !next.startsWith("/")) return null;
+  try {
+    const u = new URL(next, window.location.origin);
+    return u.origin === window.location.origin ? u.pathname + u.search + u.hash : null;
+  } catch {
+    return null;
+  }
 }
 
 export default function LoginPage() {

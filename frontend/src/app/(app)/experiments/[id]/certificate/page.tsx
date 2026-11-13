@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { api, errorText, type Schemas } from "@/lib/api/client";
 import { addDays, date, dateTime, kopecksToRub, num, percent, rubString } from "@/lib/format";
 import { AUDIT_ACTION, RESULT } from "@/lib/labels";
-import { upliftSentence, type ResultPayload } from "@/lib/result";
+import { moneyEffectLabel, upliftSentence, type ResultPayload } from "@/lib/result";
 import { isManager, useSession } from "@/lib/session";
 import { useExperiment } from "@/lib/use-experiment";
 
@@ -53,8 +53,9 @@ export default function CertificatePage() {
           <p className="text-sm font-medium">{c.business_name}</p>
           <h1 className="text-2xl font-semibold sm:text-3xl">{c.title}</h1>
           <p className="text-sm text-muted-foreground">
-            Зарегистрирован {date(c.registered_at)}, закрыт {date(c.closed_at)}. Окно замера с {date(String(p.as_of))} по{" "}
-            {date(addDays(String(p.as_of), Number(p.window_days)))}
+            Зарегистрирован {date(c.registered_at)}, закрыт {date(c.closed_at)}. Окно замера с {date(c.window_start ?? String(p.as_of))} по{" "}
+            {date(c.window_end ?? addDays(String(p.as_of), Number(p.window_days)))}
+            {c.data_complete_through && <>, выгрузка оплат полная по {date(c.data_complete_through)}</>}
           </p>
         </header>
 
@@ -65,9 +66,9 @@ export default function CertificatePage() {
           <p className="mx-auto max-w-xl text-sm text-muted-foreground">{st.explain}</p>
           {r.status !== "insufficient" && (
             <div className="grid gap-3 sm:grid-cols-2">
-              <Big label="Возврат клиентов, 95% интервал" value={upliftSentence(r.uplift_ci)} />
+              <Big label={`Возврат клиентов, ${Math.round((1 - r.alpha) * 100)}% интервал`} value={upliftSentence(r.uplift_ci)} />
               <Big
-                label="Чистый эффект после стоимости действия"
+                label={moneyEffectLabel(r)}
                 value={
                   r.net_effect_ci_kopecks
                     ? `от ${kopecksToRub(r.net_effect_ci_kopecks[0])} до ${kopecksToRub(r.net_effect_ci_kopecks[1])}`
@@ -97,11 +98,27 @@ export default function CertificatePage() {
             <dd className="tabular-nums">
               тест {percent(r.rate_test)}, контроль {percent(r.rate_control)}
             </dd>
+            {p.margin_pct != null && (
+              <>
+                <Dt>Маржа</Dt>
+                <dd>{Number(p.margin_pct)}%: деньги в эффекте — валовая прибыль = выручка × маржа</dd>
+              </>
+            )}
+            <Dt>Версия результата</Dt>
+            <dd>
+              {c.result_version ?? 1}
+              {c.revisions && c.revisions.length > 0 && (
+                <span className="block text-muted-foreground">
+                  Позже пересчитан: {c.revisions.map((v) => `версия ${v.version} (${v.reason ?? "без причины"})`).join("; ")}.
+                  Сертификат выдан по первой версии.
+                </span>
+              )}
+            </dd>
             <Dt>Стоимость действия</Dt>
             <dd>{rubString(p.cost_rub)}</dd>
             <Dt>Метод</Dt>
             <dd>
-              деление HMAC-SHA256 по seed внутри страт, расчёт по назначенным группам, бутстрэп {num(r.iterations)} повторов, 95%
+              деление HMAC-SHA256 по seed внутри страт, расчёт по назначенным группам, бутстрэп {num(r.iterations)} повторов, {Math.round((1 - r.alpha) * 100)}%
               интервал
             </dd>
           </dl>

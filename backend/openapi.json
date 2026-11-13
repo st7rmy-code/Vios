@@ -1997,6 +1997,16 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloseRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -2295,6 +2305,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CalculateRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -2365,6 +2392,7 @@
           "experiments"
         ],
         "summary": "Get Result",
+        "description": "Последняя версия результата и список всех версий.",
         "operationId": "getResult",
         "security": [
           {
@@ -3007,6 +3035,12 @@
               }
             ],
             "title": "Business Id"
+          },
+          "allow_frozen_changes": {
+            "type": "boolean",
+            "title": "Allow Frozen Changes",
+            "description": "Только администратор: применить изменения оплат в окне эксперимента после проверки",
+            "default": false
           }
         },
         "type": "object",
@@ -3066,6 +3100,26 @@
           "name"
         ],
         "title": "BusinessOut"
+      },
+      "CalculateRequest": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "Причина пересчёта: обязательна, если цифры отличаются от уже сохранённого результата"
+          }
+        },
+        "type": "object",
+        "title": "CalculateRequest"
       },
       "CertificateAuditEntry": {
         "properties": {
@@ -3175,6 +3229,55 @@
             "type": "string",
             "title": "Result Hash"
           },
+          "result_version": {
+            "type": "integer",
+            "title": "Result Version",
+            "default": 1
+          },
+          "revisions": {
+            "items": {
+              "$ref": "#/components/schemas/ResultVersionOut"
+            },
+            "type": "array",
+            "title": "Revisions",
+            "default": []
+          },
+          "data_complete_through": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Complete Through"
+          },
+          "window_start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Start"
+          },
+          "window_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window End"
+          },
           "audit": {
             "items": {
               "$ref": "#/components/schemas/CertificateAuditEntry"
@@ -3253,6 +3356,21 @@
           "last_hash"
         ],
         "title": "ChainOut"
+      },
+      "CloseRequest": {
+        "properties": {
+          "data_complete_through": {
+            "type": "string",
+            "format": "date",
+            "title": "Data Complete Through",
+            "description": "Собственник подтверждает: оплаты и возвраты выгружены полностью по эту дату включительно"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data_complete_through"
+        ],
+        "title": "CloseRequest"
       },
       "ConsentCreate": {
         "properties": {
@@ -3563,6 +3681,42 @@
               }
             ],
             "title": "Closed At"
+          },
+          "data_complete_through": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Complete Through"
+          },
+          "window_start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Start"
+          },
+          "window_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window End"
           },
           "n_control": {
             "anyOf": [
@@ -4018,6 +4172,21 @@
             "title": "Cost Rub",
             "description": "Стоимость действия C, ₽"
           },
+          "margin_pct": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Margin Pct",
+            "description": "Средняя валовая маржа, %: деньги в эффекте = выручка × маржа. 100 — считать по выручке",
+            "default": "100"
+          },
           "alpha": {
             "type": "number",
             "maximum": 0.2,
@@ -4070,6 +4239,30 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Payload"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/ResultVersionOut"
+            },
+            "type": "array",
+            "title": "Versions",
+            "default": []
           }
         },
         "type": "object",
@@ -4080,6 +4273,54 @@
           "payload"
         ],
         "title": "ResultOut"
+      },
+      "ResultVersionOut": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "computed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Computed At"
+          },
+          "result_hash": {
+            "type": "string",
+            "title": "Result Hash"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "computed_at",
+          "result_hash",
+          "reason",
+          "status"
+        ],
+        "title": "ResultVersionOut"
       },
       "Role": {
         "type": "string",

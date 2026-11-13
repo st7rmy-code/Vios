@@ -58,6 +58,7 @@ KEY: dict[ImportKind, tuple[str, ...]] = {
 MAX_ERRORS_IN_REPORT = 100
 MAX_ROWS = 500_000
 REJECT_BELOW = 0.80
+MAX_AMOUNT_RUB = Decimal(1_000_000_000)  # одна операция от миллиарда — почти наверняка ошибка выгрузки
 WARN_BELOW = 0.95
 
 _PII_HEADER = re.compile(
@@ -113,13 +114,17 @@ def parse_amount_kopecks(v: str) -> int:
         d = Decimal(s)
     except InvalidOperation as e:
         raise ValueError("сумма не число") from e
+    if not d.is_finite():
+        raise ValueError("сумма не число")
+    if abs(d) >= MAX_AMOUNT_RUB:
+        raise ValueError("слишком большая сумма")
     if d != d.quantize(Decimal("0.01")):
         raise ValueError("больше двух знаков после запятой")
     return int((d * 100).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
 
 
 def detect_pii_columns(headers: list[str], sample_rows: list[dict[str, str]]) -> dict[str, str]:
-    """Колонка → причина. Проверяем и заголовки, и содержимое (до 500 строк)."""
+    """Колонка → причина. Проверяем заголовки и содержимое всех строк: телефон в строке 501 тоже ловим."""
     found: dict[str, str] = {}
     for h in headers:
         if _PII_HEADER.search(h):
@@ -184,13 +189,18 @@ def parse_csv(data: bytes, kind: ImportKind, today: date | None = None) -> Parse
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     raw_headers = reader.fieldnames or []
     headers = [_norm_header(h) for h in raw_headers]
+    clashes = sorted({h for h in headers if headers.count(h) > 1})
+    if clashes:
+        # «Customer ID» и «customer_id» после нормализации совпадают, и одна колонка молча затёрла бы другую
+        report["blocking"].append("повторяются колонки: " + ", ".join(f"«{h}»" for h in clashes))
+        return res
     rows_raw = [{_norm_header(k): (v or "") for k, v in r.items() if k is not None} for r in reader]
     if len(rows_raw) > MAX_ROWS:
         report["rows_total"] = len(rows_raw)
         report["blocking"].append(f"больше {MAX_ROWS:,} строк в одном файле, разбейте его на части".replace(",", " "))
         return res
 
-    pii = detect_pii_columns(headers, rows_raw[:500])
+    pii = detect_pii_columns(headers, rows_raw)
     if pii:
         report["pii_columns"] = pii
         report["blocking"].append(
