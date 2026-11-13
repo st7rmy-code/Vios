@@ -24,7 +24,7 @@ import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { api, errorText, type Schemas } from "@/lib/api/client";
 import { dateTime, kopecksToRub, num, percent } from "@/lib/format";
 import { RESULT, stratumLabel } from "@/lib/labels";
-import { pp1, upliftSentence, type ResultPayload } from "@/lib/result";
+import { moneyEffectLabel, pp1, upliftSentence, type ResultPayload } from "@/lib/result";
 import { neededPerGroup } from "@/lib/stats";
 import { useExperiment } from "@/lib/use-experiment";
 
@@ -68,7 +68,10 @@ export default function ResultPage() {
             </Link>
           </p>
           <h1 className="text-2xl font-semibold">Результат</h1>
-          <p className="text-sm text-muted-foreground">Рассчитан {dateTime(res.computed_at)}</p>
+          <p className="text-sm text-muted-foreground">
+            Рассчитан {dateTime(res.computed_at)}
+            {res.version != null && res.version > 1 && <>, версия {res.version}: {res.reason}</>}
+          </p>
         </div>
         <Button variant="outline" asChild>
           <Link href={`/experiments/${id}/certificate`}>Сертификат</Link>
@@ -90,7 +93,7 @@ export default function ResultPage() {
                 <p className="text-xl font-semibold tabular-nums sm:text-2xl">{upliftSentence(r.uplift_ci)}</p>
               </div>
               <div className="rounded-lg bg-muted p-4">
-                <p className="text-sm text-muted-foreground">Дополнительная выручка за вычетом стоимости действия</p>
+                <p className="text-sm text-muted-foreground">{moneyEffectLabel(r)}</p>
                 <p className="text-xl font-semibold tabular-nums sm:text-2xl">
                   {r.net_effect_ci_kopecks
                     ? `от ${kopecksToRub(r.net_effect_ci_kopecks[0])} до ${kopecksToRub(r.net_effect_ci_kopecks[1])}`

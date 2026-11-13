@@ -24,7 +24,7 @@ import { Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { api, businessParam, errorText, type Experiment, type Schemas } from "@/lib/api/client";
-import { addDays, date, num, percent, rubString, todayIso } from "@/lib/format";
+import { date, num, percent, rubString, todayIso } from "@/lib/format";
 import { stratumLabel } from "@/lib/labels";
 import { MAX_MDE, MIN_GROUP, expectedSplit } from "@/lib/stats";
 import { cn } from "@/lib/utils";
@@ -51,6 +51,7 @@ type P = {
   max_inactive_days: number;
   window_days: number;
   cost_rub: string;
+  margin_pct?: string;
   control_share: string;
 };
 
@@ -63,6 +64,7 @@ export function ExperimentWizard({ initial }: { initial?: Experiment }) {
   const [hypothesis, setHypothesis] = useState(ip?.hypothesis ?? "");
   const [action, setAction] = useState(ip?.action ?? "");
   const [costRub, setCostRub] = useState(ip?.cost_rub ? String(Number(ip.cost_rub)) : "");
+  const [marginPct, setMarginPct] = useState(ip?.margin_pct ? String(Number(ip.margin_pct)) : "100");
   const [asOf, setAsOf] = useState(ip?.as_of ?? todayIso());
   const [inactiveDays, setInactiveDays] = useState(ip?.inactive_days ?? 30);
   const [maxInactiveDays, setMaxInactiveDays] = useState(ip?.max_inactive_days ?? 180);
@@ -84,8 +86,9 @@ export function ExperimentWizard({ initial }: { initial?: Experiment }) {
       window_days: windowDays,
       control_share: (share / 100).toFixed(2),
       cost_rub: Number(costRub || 0).toFixed(2),
+      margin_pct: Number(marginPct || 100).toFixed(2),
     }),
-    [hypothesis, action, asOf, inactiveDays, maxInactiveDays, windowDays, share, costRub],
+    [hypothesis, action, asOf, inactiveDays, maxInactiveDays, windowDays, share, costRub, marginPct],
   );
 
   // Шаг 2: живой предпросмотр когорты с задержкой 400 мс.
@@ -146,7 +149,7 @@ export function ExperimentWizard({ initial }: { initial?: Experiment }) {
   const tooSmall = mde != null && (mde.n_control < MIN_GROUP || mde.n_test < MIN_GROUP);
   const mdeTooBig = mde?.mde == null || mde.mde > MAX_MDE;
   const stepValid = [
-    title.trim() && hypothesis.trim() && action.trim() && costRub !== "",
+    title.trim() && hypothesis.trim() && action.trim() && costRub !== "" && Number(marginPct) > 0 && Number(marginPct) <= 100,
     inactiveDays < maxInactiveDays && (preview?.cohort_size ?? 0) > 0,
     mde != null, // дальше только с посчитанным MDE для текущей доли
     true,
@@ -239,13 +242,26 @@ export function ExperimentWizard({ initial }: { initial?: Experiment }) {
             <Field label="Действие с тестовой группой" id="act" hint="Это увидит исполнитель. Пишите так, чтобы было понятно, что делать.">
               <Textarea id="act" value={action} onChange={(e) => setAction(e.target.value)} placeholder="Тренер звонит и предлагает бесплатное пробное занятие" />
             </Field>
-            <Field label="Стоимость действия C, ₽" id="cost" hint={`${rubString(costRub || 0)} на всю тестовую группу. Вычитается из прироста выручки.`}>
+            <Field label="Стоимость действия C, ₽" id="cost" hint={`${rubString(costRub || 0)} на всю тестовую группу. Вычитается из прироста валовой прибыли.`}>
               <Input
                 id="cost"
                 inputMode="decimal"
                 value={costRub}
                 onChange={(e) => setCostRub(e.target.value.replace(/[^\d.,]/g, "").replace(",", "."))}
                 placeholder="20000"
+              />
+            </Field>
+            <Field
+              label="Средняя валовая маржа, %"
+              id="margin"
+              hint="Доля выручки, которая остаётся после себестоимости и скидок. Эффект в деньгах = прирост выручки × маржа. 100% — считать по выручке."
+            >
+              <Input
+                id="margin"
+                inputMode="decimal"
+                value={marginPct}
+                onChange={(e) => setMarginPct(e.target.value.replace(/[^\d.,]/g, "").replace(",", "."))}
+                placeholder="40"
               />
             </Field>
           </CardContent>
@@ -263,7 +279,7 @@ export function ExperimentWizard({ initial }: { initial?: Experiment }) {
               <Field label="Дата среза" id="asof" hint="Не позже сегодня и не раньше чем за 7 дней до регистрации">
                 <Input id="asof" type="date" value={asOf} onChange={(e) => setAsOf(e.target.value)} />
               </Field>
-              <Field label="Окно замера, дней" id="win" hint={`Ждём возврата до ${date(addDays(asOf, windowDays))}`}>
+              <Field label="Окно замера, дней" id="win" hint="Считаем от дня регистрации: оплаты до неё в результат не попадут">
                 <Input id="win" type="number" min={7} max={180} value={windowDays} onChange={(e) => setWindowDays(+e.target.value)} />
               </Field>
               <Field label="Без активности от, дней" id="in">
@@ -405,7 +421,8 @@ export function ExperimentWizard({ initial }: { initial?: Experiment }) {
               <Row k="Стоимость C" v={rubString(costRub || 0)} />
               <Row k="Дата среза" v={date(asOf)} />
               <Row k="Когорта" v={`без активности ${inactiveDays}–${maxInactiveDays} дней, ${num(n)} клиентов`} />
-              <Row k="Окно замера" v={`${windowDays} дней, до ${date(addDays(asOf, windowDays))}`} />
+              <Row k="Окно замера" v={`${windowDays} дней с даты регистрации`} />
+              <Row k="Маржа" v={`${Number(marginPct || 100)}%`} />
               <Row k="Группы" v={mde ? `контроль ${share}% (${num(mde.n_control)}), тест ${num(mde.n_test)}` : `контроль ${share}%`} />
               <Row k="MDE" v={mde?.mde != null ? `${ppText(mde.mde)} п.п.` : "—"} />
             </dl>

@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { api, type Experiment } from "@/lib/api/client";
-import { addDays, date } from "@/lib/format";
+import { date } from "@/lib/format";
 import { EXPERIMENT_STATUS } from "@/lib/labels";
 import { isManager, useSession } from "@/lib/session";
 
@@ -50,7 +50,7 @@ export default function ExperimentsPage() {
                     </div>
                     <p className="line-clamp-2 text-sm text-muted-foreground">{p.action}</p>
                     <p className="text-xs text-muted-foreground">
-                      Срез {date(p.as_of)}, замер до {date(addDays(p.as_of, p.window_days))}
+                      Срез {date(p.as_of)}, {e.window_end ? `замер до ${date(e.window_end)}` : `замер ${p.window_days} дней после регистрации`}
                     </p>
                   </CardContent>
                 </Card>

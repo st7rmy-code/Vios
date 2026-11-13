@@ -14,8 +14,9 @@ Decimal(ROUND_HALF_EVEN).
   3. нижняя граница ДИ прироста > 0, а деньги нет            → «эффект есть, окупаемость не доказана»
   4. верхняя граница ДИ прироста < 0                          → «отрицательный эффект»
   5. иначе                                                    → «эффект не обнаружен»
-Чистый эффект = (средняя выручка теста − средняя выручка контроля) × n_test − C,
-где C — стоимость действия (скидки, звонков, бонусов) в копейках.
+Чистый эффект = (средняя валовая прибыль теста − средняя валовая прибыль контроля) × n_test − C,
+где валовая прибыль = выручка × маржа из протокола, C — стоимость действия в копейках.
+Со стратами средние разницы считаются внутри страт и взвешиваются долей страты в когорте.
 """
 
 from __future__ import annotations
@@ -82,6 +83,7 @@ class EffectResult:
     rate_control_ci: tuple[float, float] | None = None
     rate_test_ci: tuple[float, float] | None = None
     by_stratum: dict[str, dict[str, dict[str, float | int]]] | None = None
+    margin: float = 1.0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -116,6 +118,10 @@ def _bootstrap_means(
     return rates, revs
 
 
+def _weighted(parts: list[tuple[float, np.ndarray | float]]) -> np.ndarray | float:
+    return sum(w * x for w, x in parts)
+
+
 def estimate_effect(
     assignment: dict[str, str],
     outcomes: list[Outcome],
@@ -124,6 +130,7 @@ def estimate_effect(
     cost_kopecks: int,
     baseline_rate: float | None = None,
     strata: dict[str, str] | None = None,
+    margin: float = 1.0,
     iterations: int = BOOTSTRAP_ITERATIONS,
     alpha: float = 0.05,
     min_group_size: int = 100,
@@ -132,8 +139,13 @@ def estimate_effect(
     """Считает эффект. Клиент без исхода считается невернувшимся с выручкой 0.
 
     Выручка клиента может быть отрицательной (возвраты в окне).
-    strata — только для показа разбивки by_stratum, на расчёт не влияет.
+    margin — доля валовой маржи (0, 1]: деньги в чистом эффекте = выручка × margin.
+    strata — страты деления. Если заданы, оценка стратифицированная: разницы считаются
+    внутри каждой страты и складываются с весом доли страты в когорте, бутстрэп
+    повторяет выборку внутри страты и группы. Без strata — вся когорта одна страта.
     """
+    if not 0 < margin <= 1:
+        raise ValueError("margin должна быть в (0, 1]")
     by_id: dict[str, Outcome] = {}
     for o in outcomes:
         if o.customer_id in by_id:
@@ -141,25 +153,34 @@ def estimate_effect(
         if o.customer_id not in assignment:
             raise ValueError(f"исход для клиента вне деления: {o.customer_id}")
         by_id[o.customer_id] = o
-    groups: dict[str, list[Outcome]] = {CONTROL: [], TEST: []}
-    for cid in sorted(assignment):
-        groups[assignment[cid]].append(by_id.get(cid, Outcome(cid, False, 0)))
 
-    def arrays(g: str) -> tuple[np.ndarray, np.ndarray]:
-        rows = groups[g]
+    cells: dict[str, dict[str, list[Outcome]]] = {}
+    for cid in sorted(assignment):
+        s = strata.get(cid, "?") if strata else "all"
+        cells.setdefault(s, {CONTROL: [], TEST: []})[assignment[cid]].append(by_id.get(cid, Outcome(cid, False, 0)))
+
+    def arrays(rows: list[Outcome]) -> tuple[np.ndarray, np.ndarray]:
         return (
             np.array([1.0 if o.returned else 0.0 for o in rows]),
-            np.array([float(o.revenue_kopecks) for o in rows]),
+            np.array([float(o.revenue_kopecks) * margin for o in rows]),
         )
 
-    rc, vc = arrays(CONTROL)
-    rt, vt = arrays(TEST)
-    n_c, n_t = len(rc), len(rt)
-    rate_c = float(rc.mean()) if n_c else 0.0
-    rate_t = float(rt.mean()) if n_t else 0.0
-    uplift = rate_t - rate_c
+    n_c = sum(len(c[CONTROL]) for c in cells.values())
+    n_t = sum(len(c[TEST]) for c in cells.values())
+    rev_c_total = sum(o.revenue_kopecks for c in cells.values() for o in c[CONTROL])
+    rev_t_total = sum(o.revenue_kopecks for c in cells.values() for o in c[TEST])
 
-    rev_c_total, rev_t_total = int(vc.sum()), int(vt.sum())
+    # страты без одной из групп в оценку не входят: в них не с чем сравнивать
+    usable = {s: c for s, c in sorted(cells.items()) if c[CONTROL] and c[TEST]}
+    n_usable = sum(len(c[CONTROL]) + len(c[TEST]) for c in usable.values())
+    data = {s: (arrays(c[CONTROL]), arrays(c[TEST])) for s, c in usable.items()}
+    w = {s: (len(c[CONTROL]) + len(c[TEST])) / n_usable for s, c in usable.items()} if n_usable else {}
+
+    rate_c = float(_weighted([(w[s], d[0][0].mean()) for s, d in data.items()])) if data else 0.0
+    rate_t = float(_weighted([(w[s], d[1][0].mean()) for s, d in data.items()])) if data else 0.0
+    gp_diff = float(_weighted([(w[s], d[1][1].mean() - d[0][1].mean()) for s, d in data.items()])) if data else 0.0
+    uplift = rate_t - rate_c
+    net = _kopecks(gp_diff * n_t - cost_kopecks)
     by_stratum = _by_stratum(assignment, by_id, strata) if strata else None
 
     p0 = baseline_rate if baseline_rate is not None else 0.05
@@ -167,26 +188,31 @@ def estimate_effect(
     mde = mde_two_proportions(p0, n_c, n_t, alpha=alpha)
 
     b_seed = bootstrap_seed_from(seed)
-    if n_c < min_group_size or n_t < min_group_size or mde > max_mde:
-        net = _kopecks(((vt.mean() if n_t else 0) - (vc.mean() if n_c else 0)) * n_t - cost_kopecks)
+    if n_c < min_group_size or n_t < min_group_size or mde > max_mde or not data:
         return EffectResult(
             Status.INSUFFICIENT, n_c, n_t, rate_c, rate_t, uplift, None,
             mde if math.isfinite(mde) else None, net, None, cost_kopecks, 0, b_seed,
-            alpha, rev_c_total, rev_t_total, None, None, by_stratum,
+            alpha, rev_c_total, rev_t_total, None, None, by_stratum, margin,
         )
 
     rng = np.random.Generator(np.random.PCG64(b_seed))
-    rate_c_b, rev_c_b = _bootstrap_means(rng, rc, vc, iterations)
-    rate_t_b, rev_t_b = _bootstrap_means(rng, rt, vt, iterations)
+    rate_c_b = np.zeros(iterations)
+    rate_t_b = np.zeros(iterations)
+    gp_diff_b = np.zeros(iterations)
+    for s, ((rc, vc), (rt, vt)) in data.items():
+        rc_b, vc_b = _bootstrap_means(rng, rc, vc, iterations)
+        rt_b, vt_b = _bootstrap_means(rng, rt, vt, iterations)
+        rate_c_b += w[s] * rc_b
+        rate_t_b += w[s] * rt_b
+        gp_diff_b += w[s] * (vt_b - vc_b)
     uplift_b = rate_t_b - rate_c_b
-    net_b = (rev_t_b - rev_c_b) * n_t - cost_kopecks
+    net_b = gp_diff_b * n_t - cost_kopecks
 
     lo_q, hi_q = 100 * alpha / 2, 100 * (1 - alpha / 2)
     u_lo, u_hi = (float(x) for x in np.percentile(uplift_b, [lo_q, hi_q]))
     rc_lo, rc_hi = (float(x) for x in np.percentile(rate_c_b, [lo_q, hi_q]))
     rt_lo, rt_hi = (float(x) for x in np.percentile(rate_t_b, [lo_q, hi_q]))
     n_lo, n_hi = (_kopecks(x) for x in np.percentile(net_b, [lo_q, hi_q]))
-    net = _kopecks((vt.mean() - vc.mean()) * n_t - cost_kopecks)
 
     if u_lo > 0 and n_lo > 0:
         status = Status.POSITIVE
@@ -200,7 +226,7 @@ def estimate_effect(
     return EffectResult(
         status, n_c, n_t, rate_c, rate_t, uplift, (u_lo, u_hi), mde, net, (n_lo, n_hi),
         cost_kopecks, iterations, b_seed, alpha, rev_c_total, rev_t_total,
-        (rc_lo, rc_hi), (rt_lo, rt_hi), by_stratum,
+        (rc_lo, rc_hi), (rt_lo, rt_hi), by_stratum, margin,
     )
 
 

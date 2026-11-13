@@ -1,5 +1,6 @@
 from datetime import date
 
+import numpy as np
 import pytest
 
 from app.stats import (
@@ -141,3 +142,36 @@ def test_outcomes_must_match_assignment():
         estimate_effect(a, [Outcome("c1", True, 1), Outcome("c1", False, 0)], seed="s", cost_kopecks=0)
     with pytest.raises(ValueError, match="вне деления"):
         estimate_effect(a, [Outcome("c3", True, 1)], seed="s", cost_kopecks=0)
+
+
+def test_margin_scales_money_not_returns():
+    a, o = run_business(2000, 0.05, 0.11, sim_seed=1, exp_seed="m")
+    full = estimate_effect(a, o, seed="m", cost_kopecks=0)
+    half = estimate_effect(a, o, seed="m", cost_kopecks=0, margin=0.5)
+    assert half.uplift == full.uplift and half.uplift_ci == full.uplift_ci
+    assert abs(half.net_effect_kopecks - full.net_effect_kopecks / 2) <= 1
+    # выручка в отчёте остаётся выручкой
+    assert half.revenue_test_kopecks == full.revenue_test_kopecks
+    with pytest.raises(ValueError):
+        estimate_effect(a, o, seed="m", cost_kopecks=0, margin=0)
+
+
+def test_stratified_estimate_corrects_imbalance():
+    # Две страты с разным базовым возвратом и разной долей контроля внутри страты.
+    # Наивная разница средних даёт ложный «эффект», стратифицированная — около нуля.
+    a, o, s = {}, [], {}
+    rng = np.random.default_rng(3)
+    for stratum, p, n_c, n_t in (("hi", 0.30, 300, 100), ("lo", 0.02, 100, 300)):
+        for g, n in (("control", n_c), ("test", n_t)):
+            for i in range(n):
+                cid = f"{stratum}-{g}-{i}"
+                a[cid], s[cid] = g, stratum
+                back = bool(rng.random() < p)
+                o.append(Outcome(cid, back, 300_000 if back else 0))
+    naive = estimate_effect(a, o, seed="st", cost_kopecks=0)
+    strat = estimate_effect(a, o, seed="st", cost_kopecks=0, strata=s)
+    assert naive.uplift < -0.08  # ложный отрицательный эффект от перекоса
+    assert abs(strat.uplift) < 0.05
+    assert strat.status is not Status.NEGATIVE
+    again = estimate_effect(a, o, seed="st", cost_kopecks=0, strata=s)
+    assert again.to_dict() == strat.to_dict()

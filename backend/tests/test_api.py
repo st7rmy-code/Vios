@@ -53,6 +53,13 @@ def _setup_experiment(client, h, title="Звонки ушедшим", protocol=P
     return r.json()["id"]
 
 
+COMPLETE = {"data_complete_through": "2026-11-04"}  # окно: 03.10–01.11, «сегодня» 05.11
+
+
+def _close(client, h, eid):
+    return client.post(f"/api/v1/experiments/{eid}/close", headers=h, json=COMPLETE)
+
+
 def _register(client, h, eid, clock_at):
     clock_at(REGISTER_AT)
     r = client.post(f"/api/v1/experiments/{eid}/register", headers=h)
@@ -158,14 +165,14 @@ def test_executor_sees_test_group_only_until_close(client, world, clock_at):
     assert all(e["seed"] is None for e in client.get("/api/v1/experiments", headers=ex).json())
     assert "control_share" not in card["protocol"] and "cost_rub" not in card["protocol"]
     assert client.get(f"/api/v1/experiments/{eid}/result", headers=ex).status_code == 403
-    assert client.post(f"/api/v1/experiments/{eid}/close", headers=ex).status_code == 403
+    assert _close(client, ex, eid).status_code == 403
 
     csv_r = client.get(f"/api/v1/experiments/{eid}/assignments.csv", headers=ex)
     assert csv_r.status_code == 200 and csv_r.text.lstrip("﻿").startswith("customer_id;group")
     log = client.get(f"/api/v1/audit?action=assignments.exported", headers=owner).json()
     assert log and log[0]["actor_login"] == "coach"
 
-    assert client.post(f"/api/v1/experiments/{eid}/close", headers=owner).status_code == 200
+    assert _close(client, owner, eid).status_code == 200
     r = client.get(f"/api/v1/experiments/{eid}/assignments?group=control", headers=ex)
     assert r.status_code == 200 and r.json()
     assert client.get(f"/api/v1/experiments/{eid}", headers=ex).json()["protocol"]["cost_rub"] == "20000.00"
@@ -174,22 +181,22 @@ def test_executor_sees_test_group_only_until_close(client, world, clock_at):
 def test_close_reasons(client, world, clock_at):
     h = world["h"]["owner"]
     eid = _setup_experiment(client, h)
-    assert client.post(f"/api/v1/experiments/{eid}/close", headers=h).json()["code"] == "not_registered"
+    assert _close(client, h, eid).json()["code"] == "not_registered"
     _register(client, h, eid, clock_at)
     clock_at(datetime(2026, 10, 20, tzinfo=UTC))
-    r = client.post(f"/api/v1/experiments/{eid}/close", headers=h)
-    assert r.status_code == 409 and r.json()["code"] == "window_not_over" and "31.10.2026" in r.json()["detail"]
+    r = _close(client, h, eid)
+    assert r.status_code == 409 and r.json()["code"] == "window_not_over" and "02.11.2026" in r.json()["detail"]
 
 
 def test_close_needs_payments_covering_window(client, world, clock_at):
     h = world["h"]["owner"]
     cust, pay, vis = _csvs()
-    pay = b"\n".join(line for line in pay.split(b"\n") if not line.startswith(b"tail"))
+    clock_at(datetime(2026, 10, 20, 9, 0, tzinfo=UTC))  # выписку выгрузили до конца окна
     for kind, data in (("customers", cust), ("payments", pay), ("visits", vis)):
         _upload(client, h, kind, data)
     eid = client.post("/api/v1/experiments", headers=h, json={"title": "t", "protocol": PROTOCOL}).json()["id"]
     _register(client, h, eid, clock_at)
-    r = client.post(f"/api/v1/experiments/{eid}/close", headers=h)
+    r = _close(client, h, eid)
     assert r.status_code == 409 and r.json()["code"] == "payments_not_covering_window"
 
 
@@ -209,7 +216,7 @@ def test_full_flow_recalculation_identical_and_certificate(client, world, clock_
     _register(client, h, eid, clock_at)
     assert client.post(f"/api/v1/experiments/{eid}/calculate", headers=h).json()["code"] == "not_closed"
     assert client.get(f"/api/v1/experiments/{eid}/result", headers=h).status_code == 404
-    client.post(f"/api/v1/experiments/{eid}/close", headers=h)
+    _close(client, h, eid)
     r1 = client.post(f"/api/v1/experiments/{eid}/calculate", headers=h).json()
     r2 = client.post(f"/api/v1/experiments/{eid}/calculate", headers=h).json()
     assert r1["payload"] == r2["payload"] and r1["result_hash"] == r2["result_hash"]
@@ -225,6 +232,51 @@ def test_full_flow_recalculation_identical_and_certificate(client, world, clock_
     assert [a["action"] for a in cert["audit"]][:2] == ["experiment.created", "experiment.registered"]
     chain = client.get("/api/v1/audit/verify", headers=h).json()
     assert chain["ok"] and chain["checked"] > 5 and len(chain["last_hash"]) == 64
+
+
+def test_frozen_data_and_result_versions(client, world, clock_at):
+    h, admin = world["h"]["owner"], world["h"]["admin"]
+    eid = _setup_experiment(client, h, protocol={**PROTOCOL, "margin_pct": "40"})
+    _register(client, h, eid, clock_at)
+    card = client.get(f"/api/v1/experiments/{eid}", headers=h).json()
+    assert card["window_start"] == "2026-10-03" and card["window_end"] == "2026-11-01"
+    assert _close(client, h, eid).status_code == 200
+    r1 = client.post(f"/api/v1/experiments/{eid}/calculate", headers=h).json()
+    assert r1["version"] == 1 and r1["payload"]["margin"] == 0.4
+    assert r1["payload"]["window_start"] == "2026-10-03"
+
+    # после закрытия новая оплата в окне — подгонка задним числом: файл не применяется
+    late = "payment_id;customer_id;paid_at;amount\nlate-1;c0000;2026-10-10;3000\n".encode()
+    r = _upload(client, h, "payments", late, "late.csv")
+    assert r.json()["status"] == "rejected" and r.json()["quality_report"]["frozen_conflicts"] == 1
+    # администратор применяет исправление после проверки, это видно в журнале
+    bid = str(world["business"].id)
+    r = client.post("/api/v1/imports", headers=admin, data={"kind": "payments", "business_id": bid,
+                                                            "allow_frozen_changes": "true"},
+                    files={"file": ("late.csv", late, "text/csv")})
+    assert r.json()["status"] == "accepted", r.text
+    log = client.get("/api/v1/audit?action=import.frozen_override", headers=admin).json()
+    assert log and log[0]["payload"]["rows"] == 1
+
+    # цифры изменились: без причины пересчёт не сохраняется, с причиной — новая версия
+    r = client.post(f"/api/v1/experiments/{eid}/calculate", headers=h)
+    assert r.status_code == 409 and r.json()["code"] == "reason_required"
+    r2 = client.post(f"/api/v1/experiments/{eid}/calculate", headers=h,
+                     json={"reason": "Банк прислал оплату с опозданием"}).json()
+    assert r2["version"] == 2 and r2["result_hash"] != r1["result_hash"] and len(r2["versions"]) == 2
+    cert = client.get(f"/api/v1/experiments/{eid}/certificate", headers=h).json()
+    assert cert["result_hash"] == r1["result_hash"] and cert["result_version"] == 1
+    assert [v["version"] for v in cert["revisions"]] == [2]
+    assert cert["data_complete_through"] == "2026-11-04"
+
+
+def test_close_completeness_date_bounds(client, world, clock_at):
+    h = world["h"]["owner"]
+    eid = _setup_experiment(client, h)
+    _register(client, h, eid, clock_at)
+    for d in ("2026-10-31", "2026-11-06"):  # раньше конца окна и позже сегодня
+        r = client.post(f"/api/v1/experiments/{eid}/close", headers=h, json={"data_complete_through": d})
+        assert r.status_code == 422 and r.json()["code"] == "completeness_date_out_of_range"
 
 
 def test_live_mde(client, world):

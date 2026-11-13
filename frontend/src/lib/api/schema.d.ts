@@ -344,7 +344,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Result */
+        /**
+         * Get Result
+         * @description Последняя версия результата и список всех версий.
+         */
         get: operations["getResult"];
         put?: never;
         post?: never;
@@ -499,6 +502,12 @@ export interface components {
             file: string;
             /** Business Id */
             business_id?: string | null;
+            /**
+             * Allow Frozen Changes
+             * @description Только администратор: применить изменения оплат в окне эксперимента после проверки
+             * @default false
+             */
+            allow_frozen_changes?: boolean;
         };
         /** BusinessCreate */
         BusinessCreate: {
@@ -521,6 +530,14 @@ export interface components {
             timezone?: string;
             /** Created At */
             created_at?: string | null;
+        };
+        /** CalculateRequest */
+        CalculateRequest: {
+            /**
+             * Reason
+             * @description Причина пересчёта: обязательна, если цифры отличаются от уже сохранённого результата
+             */
+            reason?: string | null;
         };
         /** CertificateAuditEntry */
         CertificateAuditEntry: {
@@ -567,6 +584,22 @@ export interface components {
             };
             /** Result Hash */
             result_hash: string;
+            /**
+             * Result Version
+             * @default 1
+             */
+            result_version?: number;
+            /**
+             * Revisions
+             * @default []
+             */
+            revisions?: components["schemas"]["ResultVersionOut"][];
+            /** Data Complete Through */
+            data_complete_through?: string | null;
+            /** Window Start */
+            window_start?: string | null;
+            /** Window End */
+            window_end?: string | null;
             /** Audit */
             audit: components["schemas"]["CertificateAuditEntry"][];
         };
@@ -582,6 +615,15 @@ export interface components {
             reason: string | null;
             /** Last Hash */
             last_hash: string | null;
+        };
+        /** CloseRequest */
+        CloseRequest: {
+            /**
+             * Data Complete Through
+             * Format: date
+             * @description Собственник подтверждает: оплаты и возвраты выгружены полностью по эту дату включительно
+             */
+            data_complete_through: string;
         };
         /** ConsentCreate */
         ConsentCreate: {
@@ -691,6 +733,12 @@ export interface components {
             registered_at: string | null;
             /** Closed At */
             closed_at: string | null;
+            /** Data Complete Through */
+            data_complete_through?: string | null;
+            /** Window Start */
+            window_start?: string | null;
+            /** Window End */
+            window_end?: string | null;
             /** N Control */
             n_control?: number | null;
             /** N Test */
@@ -869,6 +917,12 @@ export interface components {
              */
             cost_rub: number | string;
             /**
+             * Margin Pct
+             * @description Средняя валовая маржа, %: деньги в эффекте = выручка × маржа. 100 — считать по выручке
+             * @default 100
+             */
+            margin_pct?: number | string;
+            /**
              * Alpha
              * @default 0.05
              */
@@ -902,6 +956,34 @@ export interface components {
             payload: {
                 [key: string]: unknown;
             };
+            /**
+             * Version
+             * @default 1
+             */
+            version?: number;
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Versions
+             * @default []
+             */
+            versions?: components["schemas"]["ResultVersionOut"][];
+        };
+        /** ResultVersionOut */
+        ResultVersionOut: {
+            /** Version */
+            version: number;
+            /**
+             * Computed At
+             * Format: date-time
+             */
+            computed_at: string;
+            /** Result Hash */
+            result_hash: string;
+            /** Reason */
+            reason: string | null;
+            /** Status */
+            status: string | null;
         };
         /**
          * Role
@@ -2481,7 +2563,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CloseRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -2686,7 +2772,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CalculateRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
