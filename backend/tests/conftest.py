@@ -3,6 +3,8 @@ import os
 os.environ.setdefault("SVERKA_DATABASE_URL", "postgresql+psycopg://postgres@127.0.0.1:5432/sverka_test")
 os.environ["SVERKA_STORAGE_BACKEND"] = "memory"
 
+from datetime import UTC, datetime
+
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -13,8 +15,10 @@ from app.db import get_engine, get_sessionmaker
 from app.models import Business, Role, User
 from app.security import hash_password
 
-TABLES = ["experiment_result", "assignment", "experiment", "visit", "payment", "customer", "import_file",
-          "audit_log", "app_user", "business"]
+TABLES = ["experiment_result", "assignment", "experiment", "obligation", "visit", "payment", "customer",
+          "import_file", "data_consent", "audit_log", "app_user", "business"]
+# «Сегодня» в тестах фиксировано: окно замера эксперимента из test_api уже закончилось
+TODAY = datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
 
 
 @pytest.fixture(scope="session")
@@ -35,6 +39,20 @@ def db(migrated):
             conn.execute(text(f"DELETE FROM {t}"))
     with get_sessionmaker()() as s:
         yield s
+
+
+@pytest.fixture(autouse=True)
+def clock_at(monkeypatch):
+    """clock_at(datetime) переводит часы сервисов; по умолчанию TODAY."""
+    from app import clock
+
+    state = {"now": TODAY}
+    monkeypatch.setattr(clock, "now", lambda: state["now"])
+
+    def set_now(dt: datetime) -> None:
+        state["now"] = dt
+
+    return set_now
 
 
 @pytest.fixture
@@ -64,4 +82,6 @@ def world(db, client):
         r = client.post("/api/v1/auth/token", data={"username": u.login, "password": pw[k]})
         assert r.status_code == 200, r.text
         headers[k] = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    r = client.post("/api/v1/consents", headers=headers["owner"], json={"text_version": "csv-2026-11"})
+    assert r.status_code == 201, r.text
     return {"business": b, "users": users, "h": headers}

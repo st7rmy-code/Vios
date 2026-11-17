@@ -1,0 +1,2 @@
+obligation_id;customer_id;kind;starts_at;ends_at;visits_total;visits_used;amount;status;frozen_from;frozen_until;branch
+O-501;K00001;subscription;2026-08-01;2026-08-31;12;3;3 000,00;active;;;Центр

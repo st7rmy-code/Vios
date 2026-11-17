@@ -1,22 +1,28 @@
-"""Эксперименты. Права (ВРЕМЕННО, до «Ролей и прав»):
+"""Эксперименты (спецификация, 5.3). Права по разделу 1:
 
-* admin, owner — создают, правят черновик, регистрируют, закрывают, считают;
-* executor — видит только зарегистрированные эксперименты своего бизнеса и
-  только тестовую группу; контрольную группу и её размер — после closed.
+* admin, owner — черновик, регистрация, закрытие, расчёт, всё видят;
+* executor — только registered/closed своего бизнеса и только тестовая группа;
+  контроль, его размер, доля контроля и стоимость C скрыты до closed.
 """
 
+import csv
+import io
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_session
-from app.deps import check_business, current_user, require
-from app.models import Assignment, AuditLog, Experiment, ExperimentResult, ExperimentStatus, Role, User
+from app.deps import business_for, check_business, current_user, require
+from app.errors import ERROR_RESPONSES, ApiError
+from app.models import Assignment, AuditLog, Business, Experiment, ExperimentResult, ExperimentStatus, Role, User
 from app.schemas import (
     AssignmentOut,
+    CalculateRequest,
+    CertificateOut,
+    CloseRequest,
     ExperimentCreate,
     ExperimentOut,
     ExperimentUpdate,
@@ -25,25 +31,30 @@ from app.schemas import (
     PreviewOut,
     Protocol,
     ResultOut,
+    ResultVersionOut,
 )
+from app.services import audit
 from app.services import experiments as svc
 from app.stats import mde_two_proportions
 
-router = APIRouter(tags=["experiments"])
+router = APIRouter(tags=["experiments"], responses=ERROR_RESPONSES)
 MANAGERS = (Role.admin, Role.owner)
+HIDDEN_FROM_EXECUTOR = ("control_share", "cost_rub", "margin_pct")
 
 
 def _control_visible(user: User, exp: Experiment) -> bool:
     return user.role in MANAGERS or exp.status is ExperimentStatus.closed
 
 
-def _get(db: Session, user: User, exp_id: uuid.UUID) -> Experiment:
-    exp = db.get(Experiment, exp_id)
+def _get(db: Session, user: User, exp_id: uuid.UUID, lock: bool = False) -> Experiment:
+    # lock=True: SELECT … FOR UPDATE, чтобы два параллельных запроса не зарегистрировали,
+    # не закрыли и не посчитали один эксперимент дважды
+    exp = db.get(Experiment, exp_id, with_for_update=lock)
     if exp is None:
-        raise HTTPException(404, "Не найдено")
+        raise ApiError(404, "Не найдено", "not_found")
     check_business(user, exp.business_id)
     if user.role is Role.executor and exp.status is ExperimentStatus.draft:
-        raise HTTPException(404, "Не найдено")
+        raise ApiError(404, "Не найдено", "not_found")
     return exp
 
 
@@ -53,39 +64,38 @@ def _out(db: Session, user: User, exp: Experiment) -> ExperimentOut:
                              .group_by(Assignment.group)).all())
     if counts:
         out.n_test = counts.get("test", 0)
-        out.n_control = counts.get("control", 0) if _control_visible(user, exp) else None
+        out.n_control = counts.get("control", 0)
     if not _control_visible(user, exp):
-        out.protocol = {k: v for k, v in out.protocol.items() if k != "control_share"}
+        out.n_control = None
+        out.control_share = None
+        # по seed и списку клиентов исполнитель восстановил бы контрольную группу
+        out.seed = None
+        out.protocol = {k: v for k, v in out.protocol.items() if k not in HIDDEN_FROM_EXECUTOR}
+    if user.role is Role.executor:
+        out.data_snapshot = None
+    window = svc.window_of(db, exp)
+    if window:
+        out.window_start, out.window_end = window
     return out
 
 
 @router.post("/stats/mde", response_model=MdeResponse, operation_id="computeMde")
 def compute_mde(body: MdeRequest, _: User = Depends(require(*MANAGERS))) -> MdeResponse:
     """Живой MDE для ползунка доли контроля в мастере."""
-    n_c = round(body.cohort_size * body.control_share)
-    n_t = body.cohort_size - n_c
-    mde = mde_two_proportions(body.baseline, n_c, n_t, alpha=body.alpha, power=body.power)
-    return MdeResponse(n_control=n_c, n_test=n_t, mde=None if mde == float("inf") else mde)
+    mde = mde_two_proportions(min(max(body.baseline, 0.01), 0.99), body.n_control, body.n_test, alpha=body.alpha)
+    return MdeResponse(n_control=body.n_control, n_test=body.n_test, mde=None if mde == float("inf") else mde)
 
 
 @router.post("/experiments/preview", response_model=PreviewOut, operation_id="previewCohort")
 def preview_cohort(protocol: Protocol, business_id: uuid.UUID | None = None, db: Session = Depends(get_session),
                    user: User = Depends(require(*MANAGERS))) -> dict:
-    bid = business_id or user.business_id
-    if bid is None:
-        raise HTTPException(422, "Укажите бизнес")
-    check_business(user, bid)
-    return svc.preview(db, bid, protocol)
+    return svc.preview(db, business_for(user, business_id), protocol)
 
 
 @router.post("/experiments", response_model=ExperimentOut, status_code=201, operation_id="createExperiment")
 def create(body: ExperimentCreate, db: Session = Depends(get_session),
            user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    bid = body.business_id or user.business_id
-    if bid is None:
-        raise HTTPException(422, "Укажите бизнес")
-    check_business(user, bid)
-    exp = svc.create(db, user, bid, body.title, body.protocol)
+    exp = svc.create(db, user, business_for(user, body.business_id), body.title, body.protocol)
     db.commit()
     return _out(db, user, exp)
 
@@ -94,12 +104,8 @@ def create(body: ExperimentCreate, db: Session = Depends(get_session),
 def list_experiments(business_id: uuid.UUID | None = None, db: Session = Depends(get_session),
                      user: User = Depends(current_user)) -> list[ExperimentOut]:
     q = select(Experiment).order_by(Experiment.created_at.desc())
-    bid = business_id or user.business_id
-    if user.role is not Role.admin or bid is not None:
-        if bid is None:
-            return []
-        check_business(user, bid)
-        q = q.where(Experiment.business_id == bid)
+    if not (user.role is Role.admin and business_id is None):
+        q = q.where(Experiment.business_id == business_for(user, business_id))
     if user.role is Role.executor:
         q = q.where(Experiment.status != ExperimentStatus.draft)
     return [_out(db, user, e) for e in db.execute(q).scalars()]
@@ -111,33 +117,51 @@ def get_experiment(exp_id: uuid.UUID, db: Session = Depends(get_session),
     return _out(db, user, _get(db, user, exp_id))
 
 
-@router.patch("/experiments/{exp_id}", response_model=ExperimentOut, operation_id="updateExperiment",
-              responses={409: {"description": "Протокол уже зарегистрирован"}})
+@router.patch("/experiments/{exp_id}", response_model=ExperimentOut, operation_id="updateExperiment")
 def update(exp_id: uuid.UUID, body: ExperimentUpdate, db: Session = Depends(get_session),
            user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.update(db, user, exp, body.title, body.protocol)
     db.commit()
     return _out(db, user, exp)
 
 
-@router.post("/experiments/{exp_id}/register", response_model=ExperimentOut, operation_id="registerExperiment",
-             responses={409: {"description": "Уже зарегистрирован"}})
+@router.delete("/experiments/{exp_id}", status_code=204, operation_id="deleteExperiment")
+def delete(exp_id: uuid.UUID, db: Session = Depends(get_session),
+           user: User = Depends(require(*MANAGERS))) -> Response:
+    exp = _get(db, user, exp_id, lock=True)
+    svc.delete(db, user, exp)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/experiments/{exp_id}/register", response_model=ExperimentOut, operation_id="registerExperiment")
 def register(exp_id: uuid.UUID, db: Session = Depends(get_session),
              user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.register(db, user, exp)
     db.commit()
     return _out(db, user, exp)
 
 
 @router.post("/experiments/{exp_id}/close", response_model=ExperimentOut, operation_id="closeExperiment")
-def close(exp_id: uuid.UUID, db: Session = Depends(get_session),
+def close(exp_id: uuid.UUID, body: CloseRequest, db: Session = Depends(get_session),
           user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
-    svc.close(db, user, exp)
+    exp = _get(db, user, exp_id, lock=True)
+    svc.close(db, user, exp, body.data_complete_through)
     db.commit()
     return _out(db, user, exp)
+
+
+def _assignments(db: Session, user: User, exp: Experiment, group: str | None) -> list[Assignment]:
+    if group == "control" and not _control_visible(user, exp):
+        raise ApiError(403, "Контрольная группа откроется после закрытия эксперимента", "control_hidden")
+    q = select(Assignment).where(Assignment.experiment_id == exp.id).order_by(Assignment.customer_external_id)
+    if group is not None:
+        q = q.where(Assignment.group == group)
+    elif not _control_visible(user, exp):
+        q = q.where(Assignment.group == "test")
+    return list(db.execute(q).scalars())
 
 
 @router.get("/experiments/{exp_id}/assignments", response_model=list[AssignmentOut],
@@ -145,65 +169,94 @@ def close(exp_id: uuid.UUID, db: Session = Depends(get_session),
 def assignments(exp_id: uuid.UUID, group: Literal["test", "control"] | None = None,
                 db: Session = Depends(get_session), user: User = Depends(current_user)) -> list[AssignmentOut]:
     exp = _get(db, user, exp_id)
-    if group == "control" and not _control_visible(user, exp):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Контрольная группа откроется после закрытия эксперимента")
-    q = select(Assignment).where(Assignment.experiment_id == exp.id).order_by(Assignment.customer_external_id)
-    if group is not None:
-        q = q.where(Assignment.group == group)
-    elif not _control_visible(user, exp):
-        q = q.where(Assignment.group == "test")
     return [AssignmentOut(customer_id=a.customer_external_id, group=a.group, stratum=a.stratum)
-            for a in db.execute(q).scalars()]
+            for a in _assignments(db, user, exp, group)]
+
+
+@router.get("/experiments/{exp_id}/assignments.csv", operation_id="exportAssignments",
+            response_class=Response, responses={200: {"content": {"text/csv": {}}}})
+def export_assignments(exp_id: uuid.UUID, group: Literal["test", "control"] = "test",
+                       db: Session = Depends(get_session), user: User = Depends(current_user)) -> Response:
+    exp = _get(db, user, exp_id)
+    rows = _assignments(db, user, exp, group)
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(["customer_id", "group"])
+    for a in rows:
+        w.writerow([a.customer_external_id, a.group])
+    audit.append(db, action="assignments.exported", entity_type="experiment", entity_id=str(exp.id),
+                 payload={"group": group, "rows": len(rows)}, business_id=exp.business_id, actor_id=user.id)
+    db.commit()
+    return Response(buf.getvalue().encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{group}-{str(exp.id)[:8]}.csv"'})
+
+
+def _versions(results: list[ExperimentResult]) -> list[ResultVersionOut]:
+    return [ResultVersionOut(version=x.version, computed_at=x.computed_at, result_hash=x.result_hash,
+                             reason=x.reason, status=x.payload.get("status")) for x in results]
+
+
+def _result_out(exp: Experiment, res: ExperimentResult, results: list[ExperimentResult]) -> ResultOut:
+    return ResultOut(experiment_id=exp.id, computed_at=res.computed_at, result_hash=res.result_hash,
+                     payload=res.payload, version=res.version, reason=res.reason, versions=_versions(results))
 
 
 @router.post("/experiments/{exp_id}/calculate", response_model=ResultOut, operation_id="calculateResult")
-def calculate(exp_id: uuid.UUID, db: Session = Depends(get_session),
+def calculate(exp_id: uuid.UUID, body: CalculateRequest | None = None, db: Session = Depends(get_session),
               user: User = Depends(require(*MANAGERS))) -> ResultOut:
-    exp = _get(db, user, exp_id)
-    res = svc.calculate(db, user, exp)
+    exp = _get(db, user, exp_id, lock=True)
+    res = svc.calculate(db, user, exp, body.reason if body else None)
     db.commit()
-    return ResultOut(experiment_id=exp.id, computed_at=res.computed_at, result_hash=res.result_hash,
-                     payload=res.payload)
+    return _result_out(exp, res, svc.results_of(db, exp))
 
 
-def _latest_result(db: Session, exp: Experiment) -> ExperimentResult:
-    res = db.execute(select(ExperimentResult).where(ExperimentResult.experiment_id == exp.id)
-                     .order_by(ExperimentResult.computed_at.desc()).limit(1)).scalar_one_or_none()
-    if res is None:
-        raise HTTPException(404, "Результат ещё не рассчитан")
-    return res
+def _results(db: Session, exp: Experiment) -> list[ExperimentResult]:
+    results = svc.results_of(db, exp)
+    if not results:
+        raise ApiError(404, "Результат ещё не рассчитан", "no_result")
+    return results
 
 
 @router.get("/experiments/{exp_id}/result", response_model=ResultOut, operation_id="getResult")
 def get_result(exp_id: uuid.UUID, db: Session = Depends(get_session),
                user: User = Depends(current_user)) -> ResultOut:
+    """Последняя версия результата и список всех версий."""
     exp = _get(db, user, exp_id)
     if not _control_visible(user, exp):
-        raise HTTPException(403, "Результат откроется после закрытия эксперимента")
-    res = _latest_result(db, exp)
-    return ResultOut(experiment_id=exp.id, computed_at=res.computed_at, result_hash=res.result_hash,
-                     payload=res.payload)
+        raise ApiError(403, "Результат откроется после закрытия эксперимента", "result_hidden")
+    results = _results(db, exp)
+    return _result_out(exp, results[-1], results)
 
 
-@router.get("/experiments/{exp_id}/certificate", operation_id="getCertificate")
+@router.get("/experiments/{exp_id}/certificate", response_model=CertificateOut, operation_id="getCertificate")
 def certificate(exp_id: uuid.UUID, db: Session = Depends(get_session),
                 user: User = Depends(current_user)) -> dict:
-    """Данные сертификата: протокол, хэши и ссылки на записи журнала для проверки."""
+    """Данные сертификата: протокол, хэши и записи журнала для проверки."""
     exp = _get(db, user, exp_id)
     if exp.status is not ExperimentStatus.closed:
-        raise HTTPException(409, "Сертификат выдаётся после закрытия эксперимента")
-    res = _latest_result(db, exp)
-    log = db.execute(select(AuditLog).where(AuditLog.entity_type == "experiment",
-                                            AuditLog.entity_id == str(exp.id)).order_by(AuditLog.seq)).scalars()
+        raise ApiError(409, "Сертификат выдаётся после закрытия эксперимента", "not_closed")
+    results = _results(db, exp)
+    res = results[0]  # сертификат — по первой версии; пересчёты показываются отдельно
+    window = svc.window_of(db, exp)
+    log = list(db.execute(select(AuditLog).where(AuditLog.entity_type == "experiment",
+                                                 AuditLog.entity_id == str(exp.id)).order_by(AuditLog.seq)).scalars())
+    reg = next((r for r in log if r.action == "experiment.registered"), None)
     return {
         "experiment_id": str(exp.id),
+        "business_name": db.get(Business, exp.business_id).name,
         "title": exp.title,
         "protocol": exp.protocol,
         "protocol_hash": exp.protocol_hash,
         "seed": exp.seed,
         "registered_at": exp.registered_at,
         "closed_at": exp.closed_at,
+        "assignment_sha256": reg.payload.get("assignment_sha256") if reg else None,
         "result": res.payload,
         "result_hash": res.result_hash,
+        "result_version": res.version,
+        "revisions": _versions(results[1:]),
+        "data_complete_through": exp.data_complete_through,
+        "window_start": window[0] if window else None,
+        "window_end": window[1] if window else None,
         "audit": [{"seq": r.seq, "action": r.action, "occurred_at": r.occurred_at, "hash": r.hash} for r in log],
     }

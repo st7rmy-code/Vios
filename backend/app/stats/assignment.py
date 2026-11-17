@@ -22,8 +22,8 @@ def hmac_hex(seed: str, customer_id: str) -> str:
 
 
 def hmac_unit(seed: str, customer_id: str) -> float:
-    """Число в [0, 1) из первых 8 байт HMAC."""
-    return int(hmac_hex(seed, customer_id)[:16], 16) / 2**64
+    """Число в [0, 1) из старших 53 бит HMAC: столько точно помещается во float, 1.0 не выпадет."""
+    return (int(hmac_hex(seed, customer_id)[:16], 16) >> 11) / 2**53
 
 
 def assign_groups(
