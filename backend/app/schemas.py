@@ -109,6 +109,10 @@ class Protocol(BaseModel):
     control_share: Decimal = Field(Decimal("0.5"), ge=Decimal("0.1"), le=Decimal("0.5"))
     window_days: int = Field(30, ge=7, le=180, description="Окно замера возврата после среза")
     cost_rub: Decimal = Field(ge=0, max_digits=12, decimal_places=2, description="Стоимость действия C, ₽")
+    margin_pct: Decimal = Field(
+        Decimal("100"), gt=0, le=100, max_digits=5, decimal_places=2,
+        description="Средняя валовая маржа, %: деньги в эффекте = выручка × маржа. 100 — считать по выручке",
+    )
     alpha: float = Field(0.05, ge=0.01, le=0.2)
     # пороги можно только ужесточить (спецификация, 2.2)
     min_group_size: int = Field(100, ge=100)
@@ -145,8 +149,25 @@ class ExperimentOut(BaseModel):
     data_snapshot: dict[str, Any] | None = None
     registered_at: datetime | None
     closed_at: datetime | None
+    data_complete_through: date | None = None
+    # окно замера считается от дня регистрации (включительно), а не от даты среза
+    window_start: date | None = None
+    window_end: date | None = None
     n_control: int | None = None
     n_test: int | None = None
+
+
+class CloseRequest(BaseModel):
+    data_complete_through: date = Field(
+        description="Собственник подтверждает: оплаты и возвраты выгружены полностью по эту дату включительно"
+    )
+
+
+class CalculateRequest(BaseModel):
+    reason: str | None = Field(
+        None, min_length=3, max_length=1000,
+        description="Причина пересчёта: обязательна, если цифры отличаются от уже сохранённого результата",
+    )
 
 
 class AssignmentOut(BaseModel):
@@ -185,11 +206,22 @@ class PreviewOut(BaseModel):
     excluded_other_experiments: int
 
 
+class ResultVersionOut(BaseModel):
+    version: int
+    computed_at: datetime
+    result_hash: str
+    reason: str | None
+    status: str | None
+
+
 class ResultOut(BaseModel):
     experiment_id: uuid.UUID
     computed_at: datetime
     result_hash: str
     payload: dict[str, Any]
+    version: int = 1
+    reason: str | None = None
+    versions: list[ResultVersionOut] = []
 
 
 class AuditOut(BaseModel):
@@ -234,4 +266,10 @@ class CertificateOut(BaseModel):
     assignment_sha256: str | None
     result: dict[str, Any]
     result_hash: str
+    result_version: int = 1
+    # пересчёты после первой версии: сертификат по-прежнему по первой, но они видны
+    revisions: list[ResultVersionOut] = []
+    data_complete_through: date | None = None
+    window_start: date | None = None
+    window_end: date | None = None
     audit: list[CertificateAuditEntry]

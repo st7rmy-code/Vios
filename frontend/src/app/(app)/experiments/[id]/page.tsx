@@ -30,6 +30,9 @@ export default function ExperimentCard() {
   const [hasResult, setHasResult] = useState(false);
   const [error, setError] = useState<{ text: string; code?: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [completeThrough, setCompleteThrough] = useState(todayIso());
+  const [needReason, setNeedReason] = useState(false);
+  const [reason, setReason] = useState("");
 
   useEffect(() => {
     if (exp?.status !== "closed") return;
@@ -40,19 +43,38 @@ export default function ExperimentCard() {
   if (!exp) return <p className="text-muted-foreground">Загрузка…</p>;
   const p = exp.protocol as P;
   const st = EXPERIMENT_STATUS[exp.status];
-  const windowEnd = addDays(String(p.as_of), Number(p.window_days));
-  const windowOver = todayIso() >= windowEnd;
+  // окно замера начинается в день регистрации; у черновика его ещё нет
+  const windowEnd = exp.window_end ?? null;
+  const closeFrom = windowEnd ? addDays(windowEnd, 1) : null;
+  const windowOver = closeFrom != null && todayIso() >= closeFrom;
   const controlVisible = manager || exp.status === "closed";
 
-  async function post(path: "close" | "calculate") {
+  async function close() {
     setBusy(true);
     setError(null);
-    const url = `/api/v1/experiments/{exp_id}/${path}` as "/api/v1/experiments/{exp_id}/close";
-    const { data, error } = await api.POST(url, { params: { path: { exp_id: id } } });
+    const { data, error } = await api.POST("/api/v1/experiments/{exp_id}/close", {
+      params: { path: { exp_id: id } },
+      body: { data_complete_through: completeThrough },
+    });
     setBusy(false);
     if (error) return setError({ text: errorText(error), code: errorCode(error) });
-    if (path === "calculate") return router.push(`/experiments/${id}/result`);
-    if (data) setExp(data as Experiment);
+    if (data) setExp(data);
+  }
+
+  async function calculate() {
+    setBusy(true);
+    setError(null);
+    const { error } = await api.POST("/api/v1/experiments/{exp_id}/calculate", {
+      params: { path: { exp_id: id } },
+      body: needReason ? { reason } : null,
+    });
+    setBusy(false);
+    if (error) {
+      // цифры изменились после исправления данных: новая версия только с причиной
+      if (errorCode(error) === "reason_required") setNeedReason(true);
+      return setError({ text: errorText(error), code: errorCode(error) });
+    }
+    router.push(`/experiments/${id}/result`);
   }
 
   async function remove() {
@@ -68,8 +90,8 @@ export default function ExperimentCard() {
           <h1 className="text-2xl font-semibold">{exp.title}</h1>
           <Badge variant={st.variant}>{st.label}</Badge>
         </div>
-        <Stages exp={exp} hasResult={hasResult} windowEnd={windowEnd} />
-        {exp.status === "registered" && <Countdown end={windowEnd} />}
+        <Stages exp={exp} hasResult={hasResult} closeFrom={closeFrom} />
+        {exp.status === "registered" && windowEnd && <Countdown end={windowEnd} />}
       </div>
 
       {!manager && exp.status !== "closed" && (
@@ -104,22 +126,57 @@ export default function ExperimentCard() {
             <div className="space-y-1">
               <ConfirmDialog
                 trigger={
-                  <Button disabled={busy || !windowOver} title={windowOver ? undefined : `Можно закрыть с ${date(windowEnd)}`}>
+                  <Button
+                    disabled={busy || !windowOver}
+                    title={windowOver || !closeFrom ? undefined : `Можно закрыть с ${date(closeFrom)}`}
+                  >
                     Закрыть эксперимент
                   </Button>
                 }
                 title="Закрыть эксперимент?"
-                description="После закрытия исполнители увидят контрольную группу, а результат можно будет рассчитать."
-                confirm="Закрыть"
-                onConfirm={() => post("close")}
+                description={
+                  <div className="space-y-3">
+                    <p>После закрытия исполнители увидят контрольную группу, а результат можно будет рассчитать.</p>
+                    <p>
+                      Подтвердите, что оплаты и возвраты выгружены полностью. Новые оплаты за окно замера после
+                      закрытия не примутся.
+                    </p>
+                    <label className="block space-y-1">
+                      <span className="font-medium text-foreground">Выгрузка полная по дату включительно</span>
+                      <Input
+                        type="date"
+                        value={completeThrough}
+                        min={windowEnd ?? undefined}
+                        max={todayIso()}
+                        onChange={(e) => setCompleteThrough(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                }
+                confirm="Подтверждаю и закрываю"
+                onConfirm={close}
               />
-              {!windowOver && <p className="text-xs text-muted-foreground">Закрыть можно с {date(windowEnd)}, когда закончится окно замера.</p>}
+              {!windowOver && closeFrom && (
+                <p className="text-xs text-muted-foreground">Закрыть можно с {date(closeFrom)}, когда закончится окно замера.</p>
+              )}
             </div>
           )}
           {exp.status === "closed" && (
-            <Button disabled={busy} variant={hasResult ? "outline" : "default"} onClick={() => post("calculate")}>
-              {hasResult ? "Пересчитать результат" : "Рассчитать результат"}
-            </Button>
+            <div className="flex flex-wrap items-end gap-2">
+              {needReason && (
+                <label className="space-y-1 text-sm">
+                  <span className="text-muted-foreground">Причина пересчёта (сохранится в журнале)</span>
+                  <Input value={reason} onChange={(e) => setReason(e.target.value)} className="w-80" />
+                </label>
+              )}
+              <Button
+                disabled={busy || (needReason && reason.trim().length < 3)}
+                variant={hasResult ? "outline" : "default"}
+                onClick={calculate}
+              >
+                {needReason ? "Сохранить новую версию" : hasResult ? "Пересчитать результат" : "Рассчитать результат"}
+              </Button>
+            </div>
           )}
         </div>
       )}
@@ -157,8 +214,17 @@ export default function ExperimentCard() {
               {manager && <Row k="Действие" v={String(p.action)} />}
               <Row k="Дата среза" v={date(String(p.as_of))} />
               <Row k="Когорта" v={`без активности ${p.inactive_days}–${p.max_inactive_days} дней`} />
-              <Row k="Окно замера" v={`${p.window_days} дней, до ${date(windowEnd)}`} />
+              <Row
+                k="Окно замера"
+                v={
+                  exp.window_start && windowEnd
+                    ? `${p.window_days} дней: ${date(exp.window_start)} – ${date(windowEnd)}`
+                    : `${p.window_days} дней с даты регистрации`
+                }
+              />
               {p.cost_rub != null && <Row k="Стоимость C" v={rubString(p.cost_rub)} />}
+              {p.margin_pct != null && <Row k="Маржа" v={`${Number(p.margin_pct)}%`} />}
+              {exp.data_complete_through && <Row k="Выгрузка полная по" v={date(exp.data_complete_through)} />}
               {exp.control_share != null && <Row k="Доля контроля" v={`${Math.round(Number(exp.control_share) * 100)}%`} />}
               {exp.n_test != null && (
                 <Row k="Группы" v={`тест ${num(exp.n_test)}${exp.n_control != null ? `, контроль ${num(exp.n_control)}` : ""}`} />
@@ -214,14 +280,14 @@ export default function ExperimentCard() {
   );
 }
 
-function Stages({ exp, hasResult, windowEnd }: { exp: Experiment; hasResult: boolean; windowEnd: string }) {
+function Stages({ exp, hasResult, closeFrom }: { exp: Experiment; hasResult: boolean; closeFrom: string | null }) {
   const steps = [
     { label: "Черновик", done: true, when: null as string | null },
     { label: "Зарегистрирован", done: !!exp.registered_at, when: exp.registered_at ? dateTime(exp.registered_at) : null },
     {
       label: "Закрыт",
       done: !!exp.closed_at,
-      when: exp.closed_at ? dateTime(exp.closed_at) : exp.registered_at ? `не раньше ${date(windowEnd)}` : null,
+      when: exp.closed_at ? dateTime(exp.closed_at) : exp.registered_at && closeFrom ? `не раньше ${date(closeFrom)}` : null,
     },
     { label: "Результат", done: hasResult, when: null },
   ];

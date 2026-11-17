@@ -4,7 +4,7 @@
 1. была хотя бы одна оплата до среза и оплаты минус возвраты > 0;
 2. нет действующего обязательства на срез (абонемент/пакет/предоплата);
 3. не в заморозке;
-4. от последней активности (посещение или конец последнего обязательства)
+4. от последней активности (посещение, оплата или конец последнего обязательства)
    до среза прошло от inactive_days до max_inactive_days дней включительно;
 5. не состоит в другом зарегистрированном эксперименте этого бизнеса.
 
@@ -30,6 +30,8 @@ class Customer:
     active_obligation: bool = False
     frozen: bool = False
     in_other_experiment: bool = False
+    # последняя оплата до среза: недавно заплативший клиент не «ушедший», даже без визитов
+    last_paid_at: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +43,7 @@ class CohortRule:
 
 
 def _last_activity(c: Customer) -> date | None:
-    dates = [d for d in (c.last_visit_at, c.subscription_ends_at) if d is not None]
+    dates = [d for d in (c.last_visit_at, c.subscription_ends_at, c.last_paid_at) if d is not None]
     return max(dates) if dates else None
 
 

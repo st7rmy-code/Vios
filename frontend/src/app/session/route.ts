@@ -1,11 +1,12 @@
 import { cookies } from "next/headers";
 
-import { BACKEND_URL, TOKEN_COOKIE } from "@/lib/backend";
+import { BACKEND_URL, TOKEN_COOKIE, forbidden, isSameOriginMutation } from "@/lib/backend";
 
 export const dynamic = "force-dynamic";
 
 /** Вход: логин и пароль уходят в FastAPI, токен кладём в httpOnly cookie. */
 export async function POST(req: Request) {
+  if (!isSameOriginMutation(req)) return forbidden();
   const { login, password } = (await req.json()) as { login?: string; password?: string };
   const res = await fetch(`${BACKEND_URL}/api/v1/auth/token`, {
     method: "POST",
@@ -26,7 +27,8 @@ export async function POST(req: Request) {
 }
 
 /** Выход: удаляем cookie. */
-export async function DELETE() {
+export async function DELETE(req: Request) {
+  if (!isSameOriginMutation(req)) return forbidden();
   (await cookies()).delete(TOKEN_COOKIE);
   return new Response(null, { status: 204 });
 }

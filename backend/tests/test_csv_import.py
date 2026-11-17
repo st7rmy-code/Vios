@@ -1,3 +1,5 @@
+import pytest
+
 from app.models import ImportKind
 from app.services.csv_import import parse_amount_kopecks, parse_csv, sha256_bytes
 
@@ -90,3 +92,20 @@ def test_missing_columns_blocking():
 def test_amount_parsing_exact():
     assert parse_amount_kopecks("0,10") == 10
     assert parse_amount_kopecks("1 234,56 ₽") == 123_456
+
+
+def test_pii_found_beyond_first_500_rows():
+    rows = ["customer_id;first_paid_at"] + [f"c{i};2025-01-01" for i in range(600)] + ["+7 912 345-67-89;2025-01-01"]
+    r = parse_csv("\n".join(rows).encode(), ImportKind.customers)
+    assert not r.accepted and "customer_id" in r.report["pii_columns"]
+
+
+def test_header_clash_after_normalization_blocks():
+    r = parse_csv(b"customer_id;Customer ID;first_paid_at\nc1;c2;2025-01-01\n", ImportKind.customers)
+    assert not r.accepted and any("customer_id" in b for b in r.report["blocking"])
+
+
+@pytest.mark.parametrize("v", ["Infinity", "NaN", "1e12"])
+def test_amount_rejects_non_finite_and_huge(v):
+    with pytest.raises(ValueError):
+        parse_amount_kopecks(v)

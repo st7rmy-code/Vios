@@ -14,6 +14,8 @@ export type ResultPayload = {
   uplift_ci: [number, number] | null;
   mde: number | null;
   alpha: number;
+  /** доля валовой маржи (0, 1]; 1 — эффект в выручке. В старых результатах поля нет */
+  margin?: number;
   revenue_control_kopecks: number;
   revenue_test_kopecks: number;
   net_effect_kopecks: number;
@@ -36,4 +38,11 @@ export function upliftSentence(ci: [number, number] | null): string {
   if (lo > 0) return `Возврат вырос на ${ppRange(lo, hi)}`;
   if (hi < 0) return `Возврат снизился на ${ppRange(-hi, -lo)}`;
   return `Изменение возврата от ${pp1(lo)} до ${pp1(hi)}`;
+}
+
+/** Подпись денежного эффекта: при марже меньше 100% это валовая прибыль, а не выручка. */
+export function moneyEffectLabel(r: { margin?: number }): string {
+  return r.margin != null && r.margin < 1
+    ? `Дополнительная валовая прибыль (маржа ${Math.round(r.margin * 100)}%) за вычетом стоимости действия`
+    : "Дополнительная выручка за вычетом стоимости действия";
 }

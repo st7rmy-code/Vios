@@ -20,7 +20,9 @@ from app.errors import ERROR_RESPONSES, ApiError
 from app.models import Assignment, AuditLog, Business, Experiment, ExperimentResult, ExperimentStatus, Role, User
 from app.schemas import (
     AssignmentOut,
+    CalculateRequest,
     CertificateOut,
+    CloseRequest,
     ExperimentCreate,
     ExperimentOut,
     ExperimentUpdate,
@@ -29,6 +31,7 @@ from app.schemas import (
     PreviewOut,
     Protocol,
     ResultOut,
+    ResultVersionOut,
 )
 from app.services import audit
 from app.services import experiments as svc
@@ -36,15 +39,17 @@ from app.stats import mde_two_proportions
 
 router = APIRouter(tags=["experiments"], responses=ERROR_RESPONSES)
 MANAGERS = (Role.admin, Role.owner)
-HIDDEN_FROM_EXECUTOR = ("control_share", "cost_rub")
+HIDDEN_FROM_EXECUTOR = ("control_share", "cost_rub", "margin_pct")
 
 
 def _control_visible(user: User, exp: Experiment) -> bool:
     return user.role in MANAGERS or exp.status is ExperimentStatus.closed
 
 
-def _get(db: Session, user: User, exp_id: uuid.UUID) -> Experiment:
-    exp = db.get(Experiment, exp_id)
+def _get(db: Session, user: User, exp_id: uuid.UUID, lock: bool = False) -> Experiment:
+    # lock=True: SELECT … FOR UPDATE, чтобы два параллельных запроса не зарегистрировали,
+    # не закрыли и не посчитали один эксперимент дважды
+    exp = db.get(Experiment, exp_id, with_for_update=lock)
     if exp is None:
         raise ApiError(404, "Не найдено", "not_found")
     check_business(user, exp.business_id)
@@ -63,9 +68,14 @@ def _out(db: Session, user: User, exp: Experiment) -> ExperimentOut:
     if not _control_visible(user, exp):
         out.n_control = None
         out.control_share = None
+        # по seed и списку клиентов исполнитель восстановил бы контрольную группу
+        out.seed = None
         out.protocol = {k: v for k, v in out.protocol.items() if k not in HIDDEN_FROM_EXECUTOR}
     if user.role is Role.executor:
         out.data_snapshot = None
+    window = svc.window_of(db, exp)
+    if window:
+        out.window_start, out.window_end = window
     return out
 
 
@@ -110,7 +120,7 @@ def get_experiment(exp_id: uuid.UUID, db: Session = Depends(get_session),
 @router.patch("/experiments/{exp_id}", response_model=ExperimentOut, operation_id="updateExperiment")
 def update(exp_id: uuid.UUID, body: ExperimentUpdate, db: Session = Depends(get_session),
            user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.update(db, user, exp, body.title, body.protocol)
     db.commit()
     return _out(db, user, exp)
@@ -119,7 +129,7 @@ def update(exp_id: uuid.UUID, body: ExperimentUpdate, db: Session = Depends(get_
 @router.delete("/experiments/{exp_id}", status_code=204, operation_id="deleteExperiment")
 def delete(exp_id: uuid.UUID, db: Session = Depends(get_session),
            user: User = Depends(require(*MANAGERS))) -> Response:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.delete(db, user, exp)
     db.commit()
     return Response(status_code=204)
@@ -128,17 +138,17 @@ def delete(exp_id: uuid.UUID, db: Session = Depends(get_session),
 @router.post("/experiments/{exp_id}/register", response_model=ExperimentOut, operation_id="registerExperiment")
 def register(exp_id: uuid.UUID, db: Session = Depends(get_session),
              user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
+    exp = _get(db, user, exp_id, lock=True)
     svc.register(db, user, exp)
     db.commit()
     return _out(db, user, exp)
 
 
 @router.post("/experiments/{exp_id}/close", response_model=ExperimentOut, operation_id="closeExperiment")
-def close(exp_id: uuid.UUID, db: Session = Depends(get_session),
+def close(exp_id: uuid.UUID, body: CloseRequest, db: Session = Depends(get_session),
           user: User = Depends(require(*MANAGERS))) -> ExperimentOut:
-    exp = _get(db, user, exp_id)
-    svc.close(db, user, exp)
+    exp = _get(db, user, exp_id, lock=True)
+    svc.close(db, user, exp, body.data_complete_through)
     db.commit()
     return _out(db, user, exp)
 
@@ -181,33 +191,41 @@ def export_assignments(exp_id: uuid.UUID, group: Literal["test", "control"] = "t
                     headers={"Content-Disposition": f'attachment; filename="{group}-{str(exp.id)[:8]}.csv"'})
 
 
-@router.post("/experiments/{exp_id}/calculate", response_model=ResultOut, operation_id="calculateResult")
-def calculate(exp_id: uuid.UUID, db: Session = Depends(get_session),
-              user: User = Depends(require(*MANAGERS))) -> ResultOut:
-    exp = _get(db, user, exp_id)
-    res = svc.calculate(db, user, exp)
-    db.commit()
+def _versions(results: list[ExperimentResult]) -> list[ResultVersionOut]:
+    return [ResultVersionOut(version=x.version, computed_at=x.computed_at, result_hash=x.result_hash,
+                             reason=x.reason, status=x.payload.get("status")) for x in results]
+
+
+def _result_out(exp: Experiment, res: ExperimentResult, results: list[ExperimentResult]) -> ResultOut:
     return ResultOut(experiment_id=exp.id, computed_at=res.computed_at, result_hash=res.result_hash,
-                     payload=res.payload)
+                     payload=res.payload, version=res.version, reason=res.reason, versions=_versions(results))
 
 
-def _latest_result(db: Session, exp: Experiment) -> ExperimentResult:
-    res = db.execute(select(ExperimentResult).where(ExperimentResult.experiment_id == exp.id)
-                     .order_by(ExperimentResult.computed_at.desc()).limit(1)).scalar_one_or_none()
-    if res is None:
+@router.post("/experiments/{exp_id}/calculate", response_model=ResultOut, operation_id="calculateResult")
+def calculate(exp_id: uuid.UUID, body: CalculateRequest | None = None, db: Session = Depends(get_session),
+              user: User = Depends(require(*MANAGERS))) -> ResultOut:
+    exp = _get(db, user, exp_id, lock=True)
+    res = svc.calculate(db, user, exp, body.reason if body else None)
+    db.commit()
+    return _result_out(exp, res, svc.results_of(db, exp))
+
+
+def _results(db: Session, exp: Experiment) -> list[ExperimentResult]:
+    results = svc.results_of(db, exp)
+    if not results:
         raise ApiError(404, "Результат ещё не рассчитан", "no_result")
-    return res
+    return results
 
 
 @router.get("/experiments/{exp_id}/result", response_model=ResultOut, operation_id="getResult")
 def get_result(exp_id: uuid.UUID, db: Session = Depends(get_session),
                user: User = Depends(current_user)) -> ResultOut:
+    """Последняя версия результата и список всех версий."""
     exp = _get(db, user, exp_id)
     if not _control_visible(user, exp):
         raise ApiError(403, "Результат откроется после закрытия эксперимента", "result_hidden")
-    res = _latest_result(db, exp)
-    return ResultOut(experiment_id=exp.id, computed_at=res.computed_at, result_hash=res.result_hash,
-                     payload=res.payload)
+    results = _results(db, exp)
+    return _result_out(exp, results[-1], results)
 
 
 @router.get("/experiments/{exp_id}/certificate", response_model=CertificateOut, operation_id="getCertificate")
@@ -217,7 +235,9 @@ def certificate(exp_id: uuid.UUID, db: Session = Depends(get_session),
     exp = _get(db, user, exp_id)
     if exp.status is not ExperimentStatus.closed:
         raise ApiError(409, "Сертификат выдаётся после закрытия эксперимента", "not_closed")
-    res = _latest_result(db, exp)
+    results = _results(db, exp)
+    res = results[0]  # сертификат — по первой версии; пересчёты показываются отдельно
+    window = svc.window_of(db, exp)
     log = list(db.execute(select(AuditLog).where(AuditLog.entity_type == "experiment",
                                                  AuditLog.entity_id == str(exp.id)).order_by(AuditLog.seq)).scalars())
     reg = next((r for r in log if r.action == "experiment.registered"), None)
@@ -233,5 +253,10 @@ def certificate(exp_id: uuid.UUID, db: Session = Depends(get_session),
         "assignment_sha256": reg.payload.get("assignment_sha256") if reg else None,
         "result": res.payload,
         "result_hash": res.result_hash,
+        "result_version": res.version,
+        "revisions": _versions(results[1:]),
+        "data_complete_through": exp.data_complete_through,
+        "window_start": window[0] if window else None,
+        "window_end": window[1] if window else None,
         "audit": [{"seq": r.seq, "action": r.action, "occurred_at": r.occurred_at, "hash": r.hash} for r in log],
     }

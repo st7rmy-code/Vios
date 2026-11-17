@@ -98,7 +98,7 @@ for a in groups:
     if rnd.random() < p:
         after.append(f"R-{a['customer_id']};{a['customer_id']};{AS_OF + timedelta(days=rnd.randint(1, 30))};3000")
 upload(own, "payments", after, "payments_after.csv")
-ok(c.post(f"/experiments/{exp['id']}/close", headers=own))
+ok(c.post(f"/experiments/{exp['id']}/close", headers=own, json={"data_complete_through": TODAY.isoformat()}))
 res = ok(c.post(f"/experiments/{exp['id']}/calculate", headers=own))
 print("закрыт:", res["payload"]["status_label"], exp["id"])
 

@@ -22,6 +22,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     Boolean,
     CheckConstraint,
     Index,
@@ -231,6 +232,8 @@ class Experiment(Base):
     data_snapshot: Mapped[dict | None] = mapped_column(JSONB)
     registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # собственник при закрытии подтверждает: выгрузка оплат полная по эту дату включительно
+    data_complete_through: Mapped[date | None] = mapped_column(Date)
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("app_user.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -244,11 +247,16 @@ class Assignment(Base):
 
 
 class ExperimentResult(Base):
+    """Версии результата: первая — основная (по ней сертификат), пересчёт с другими цифрами — новая версия с причиной."""
+
     __tablename__ = "experiment_result"
+    __table_args__ = (UniqueConstraint("experiment_id", "version", name="uq_experiment_result_version"),)
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     experiment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("experiment.id"), index=True)
     payload: Mapped[dict] = mapped_column(JSONB)
     result_hash: Mapped[str] = mapped_column(String(64))
+    version: Mapped[int] = mapped_column(Integer, server_default="1", default=1)
+    reason: Mapped[str | None] = mapped_column(Text)
     computed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("app_user.id"))
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

@@ -13,11 +13,13 @@ from app.db import get_session
 from app.deps import business_for, check_business, require
 from app.errors import ERROR_RESPONSES, ApiError
 from app.models import (
+    Assignment,
     Business,
     ConsentKind,
     Customer,
     ExperimentResult,
     Experiment,
+    ExperimentStatus,
     ImportFile,
     ImportKind,
     ImportStatus,
@@ -44,6 +46,8 @@ async def upload(
     kind: ImportKind = Form(...),
     file: UploadFile = File(...),
     business_id: uuid.UUID | None = Form(None),
+    allow_frozen_changes: bool = Form(
+        False, description="Только администратор: применить изменения оплат в окне эксперимента после проверки"),
     db: Session = Depends(get_session),
     user: User = Depends(require(Role.admin, Role.owner)),
 ) -> ImportOut:
@@ -68,9 +72,21 @@ async def upload(
         return out
 
     report = parsed.report
+    frozen = 0
+    if parsed.accepted and kind is ImportKind.payments:
+        frozen = _frozen_conflicts(db, bid, parsed.rows)
+        report["frozen_conflicts"] = frozen
+        if frozen and not (allow_frozen_changes and user.role is Role.admin):
+            parsed.accepted = False
+            report["blocking"].append(
+                f"Операций, которые меняют данные эксперимента задним числом: {frozen}. Это изменённые оплаты "
+                "в окне зарегистрированного эксперимента или новые оплаты в окне уже закрытого. Файл не применён: "
+                "данные эксперимента заморожены. Если это исправление ошибки, его применит администратор платформы "
+                "после проверки."
+            )
     imp = ImportFile(
         business_id=bid, kind=kind, filename=(file.filename or "upload.csv")[:300], sha256=parsed.sha256,
-        size_bytes=parsed.size_bytes, status=ImportStatus.accepted if parsed.accepted else ImportStatus.rejected,
+        size_bytes=parsed.size_bytes, created_at=clock.now(), status=ImportStatus.accepted if parsed.accepted else ImportStatus.rejected,
         quality_report=report, uploaded_by=user.id,
     )
     db.add(imp)
@@ -87,6 +103,10 @@ async def upload(
                  payload={"kind": kind.value, "sha256": parsed.sha256, "rows_valid": report["rows_valid"],
                           "rows_total": report["rows_total"], "pii_columns": sorted(report["pii_columns"]),
                           "orphan_customers": report.get("orphan_customers", 0)})
+    if frozen:
+        audit.append(db, action="import.frozen_override" if parsed.accepted else "import.frozen_rejected",
+                     entity_type="import", entity_id=str(imp.id), business_id=bid, actor_id=user.id,
+                     payload={"rows": frozen})
     if overwritten:
         has_results = db.execute(
             select(func.count()).select_from(ExperimentResult)
@@ -98,6 +118,50 @@ async def upload(
                          business_id=bid, actor_id=user.id, payload={"rows": overwritten})
     db.commit()
     return ImportOut.model_validate(imp)
+
+
+def _frozen_conflicts(db: Session, bid: uuid.UUID, rows: list[dict]) -> int:
+    """Сколько строк выписки оплат меняют данные эксперимента задним числом.
+
+    Конфликт — (1) существующая оплата изменилась (клиент, дата, сумма или тип), и старая
+    или новая версия попадает в окно зарегистрированного или закрытого эксперимента для
+    клиента из его деления; (2) новая оплата попадает в окно уже закрытого эксперимента:
+    при закрытии собственник подтвердил, что выгрузка полная.
+    """
+    from app.services.experiments import window_of
+
+    exps = list(db.execute(select(Experiment).where(
+        Experiment.business_id == bid, Experiment.status != ExperimentStatus.draft)).scalars())
+    if not exps:
+        return 0
+    windows: dict[uuid.UUID, tuple] = {}
+    for e in exps:
+        w = window_of(db, e)
+        if w:
+            windows[e.id] = (*w, e.status is ExperimentStatus.closed)
+    by_customer: dict[str, list[tuple]] = {}
+    for eid, cid in db.execute(select(Assignment.experiment_id, Assignment.customer_external_id)
+                               .where(Assignment.experiment_id.in_(list(windows)))).all():
+        by_customer.setdefault(cid, []).append(windows[eid])
+
+    def touches(cid: str, day, closed_only: bool = False) -> bool:
+        return any(start <= day <= end and (closed or not closed_only) for start, end, closed in by_customer.get(cid, ()))
+
+    existing: dict[str, tuple] = {}
+    ids = [r["payment_id"] for r in rows]
+    for chunk in _chunks([{"id": i} for i in ids], 5000):
+        for pay in db.execute(select(Payment).where(
+                Payment.business_id == bid, Payment.external_id.in_([c["id"] for c in chunk]))).scalars():
+            existing[pay.external_id] = (pay.customer_external_id, pay.paid_at, pay.amount_kopecks, pay.operation.value)
+    conflicts = 0
+    for r in rows:
+        new = (r["customer_id"], r["paid_at"], r["amount"], r["operation"])
+        old = existing.get(r["payment_id"])
+        if old is None:
+            conflicts += touches(new[0], new[1], closed_only=True)
+        elif old != new:
+            conflicts += touches(old[0], old[1]) or touches(new[0], new[1])
+    return conflicts
 
 
 def _chunks(rows: list[dict], size: int):
