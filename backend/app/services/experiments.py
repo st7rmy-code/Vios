@@ -21,6 +21,7 @@ from app import clock, stats
 from app.errors import ApiError
 from app.models import (
     Assignment,
+    AuditLog,
     Business,
     Customer,
     Experiment,
@@ -40,8 +41,10 @@ from app.models import (
 from app.schemas import Protocol
 from app.services import audit
 from app.services.audit import canonical_json
+from app.stats.assignment import control_size
 
 AS_OF_MAX_AGE_DAYS = 7
+PAYMENTS_REUPLOADED = "import.payments_reuploaded"
 
 
 def protocol_hash(protocol: dict, seed: str) -> str:
@@ -59,6 +62,11 @@ def rule_of(p: Protocol) -> stats.CohortRule:
 def business_today(db: Session, business_id: uuid.UUID) -> date:
     b = db.get(Business, business_id)
     return clock.today(b.timezone if b else "Europe/Moscow")
+
+
+def lock_business(db: Session, business_id: uuid.UUID) -> None:
+    # FOR NO KEY UPDATE сериализует операции с когортой и оплатами, сохраняя доступ по внешним ключам.
+    db.execute(select(Business.id).where(Business.id == business_id).with_for_update(key_share=True))
 
 
 # --- данные на дату среза -------------------------------------------------------------------
@@ -194,22 +202,16 @@ def clamp_baseline(b: float | None) -> float:
     return min(max(b if b is not None else 0.05, 0.01), 0.99)
 
 
-def expected_split(n: int, share: Decimal) -> tuple[int, int]:
-    from decimal import ROUND_HALF_EVEN
-
-    n_c = int((share * n).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
-    return n_c, n - n_c
-
-
 def preview(db: Session, business_id: uuid.UUID, p: Protocol) -> dict:
     rule = rule_of(p)
     cohort, excluded = stats.cohort_with_exclusions(load_customers(db, business_id, p.as_of), rule)
     n = len(cohort)
-    n_c, n_t = expected_split(n, p.control_share)
+    strata = Counter(stats.assign_strata(cohort, rule).values())
+    n_c = sum(control_size(size, p.control_share) for size in strata.values())
+    n_t = n - n_c
     base = baseline_rate(db, business_id, p)
     used = clamp_baseline(base)
     mde = stats.mde_two_proportions(used, n_c, n_t, alpha=p.alpha) if n_c and n_t else None
-    strata = Counter(stats.assign_strata(cohort, rule).values())
     return {
         "cohort_size": n, "baseline": base, "baseline_used": used, "n_control": n_c, "n_test": n_t,
         "mde": mde, "strata": [{"stratum": s, "n": k} for s, k in sorted(strata.items())],
@@ -275,6 +277,7 @@ def data_snapshot(db: Session, business_id: uuid.UUID) -> dict:
 def register(db: Session, user: User, exp: Experiment) -> Experiment:
     ensure_draft(exp)
     p = Protocol.model_validate(exp.protocol)
+    lock_business(db, exp.business_id)
     today = business_today(db, exp.business_id)
     if p.as_of > today or p.as_of < today - timedelta(days=AS_OF_MAX_AGE_DAYS):
         raise ApiError(422, f"Дата среза должна быть не позже сегодняшней и не раньше чем за {AS_OF_MAX_AGE_DAYS} "
@@ -330,6 +333,7 @@ def close(db: Session, user: User, exp: Experiment, data_complete_through: date)
     """
     if exp.status is not ExperimentStatus.registered:
         raise ApiError(409, "Закрыть можно только зарегистрированный эксперимент", "not_registered")
+    lock_business(db, exp.business_id)
     _, end = window_of(db, exp)
     today = business_today(db, exp.business_id)
     if today <= end:
@@ -340,11 +344,17 @@ def close(db: Session, user: User, exp: Experiment, data_complete_through: date)
                        "completeness_date_out_of_range")
     b = db.get(Business, exp.business_id)
     tz = ZoneInfo(b.timezone if b else "Europe/Moscow")
+    uploads = (
+        select(ImportFile.created_at.label("uploaded_at"))
+        .where(ImportFile.business_id == exp.business_id, ImportFile.kind == ImportKind.payments,
+               ImportFile.status == ImportStatus.accepted)
+        .union_all(select(AuditLog.occurred_at).where(
+            AuditLog.business_id == exp.business_id, AuditLog.action == PAYMENTS_REUPLOADED,
+        ))
+        .subquery()
+    )
     last_upload = db.execute(
-        select(func.max(ImportFile.created_at)).where(
-            ImportFile.business_id == exp.business_id, ImportFile.kind == ImportKind.payments,
-            ImportFile.status == ImportStatus.accepted,
-        )
+        select(func.max(uploads.c.uploaded_at))
     ).scalar_one_or_none()
     if last_upload is None or last_upload.astimezone(tz).date() <= end:
         have = f"последняя загрузка {last_upload.astimezone(tz):%d.%m.%Y}" if last_upload else "оплаты не загружались"
@@ -382,6 +392,7 @@ def calculate(db: Session, user: User, exp: Experiment, reason: str | None = Non
     """
     if exp.status is not ExperimentStatus.closed:
         raise ApiError(409, "Результат считается после закрытия эксперимента", "not_closed")
+    lock_business(db, exp.business_id)
     p = Protocol.model_validate(exp.protocol)
     start, end = window_of(db, exp)
     rows = db.execute(
@@ -402,16 +413,20 @@ def calculate(db: Session, user: User, exp: Experiment, reason: str | None = Non
     payload["window_start"] = start.isoformat()
     payload["window_end"] = end.isoformat()
     payload["data_complete_through"] = exp.data_complete_through.isoformat() if exp.data_complete_through else None
-    payload["payment_import_ids"] = payment_import_ids(db, exp.business_id, list(assignment), start, end)
     payload = _json_safe(payload)
-    result_hash = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
 
     previous = results_of(db, exp)
-    if previous and previous[-1].result_hash == result_hash:
-        return previous[-1]
-    if previous and not (reason and reason.strip()):
-        raise ApiError(409, "Цифры отличаются от сохранённого результата: укажите причину пересчёта",
-                       "reason_required")
+    if previous:
+        previous_payload = dict(previous[-1].payload)
+        # Новый источник тех же оплат сам по себе не меняет рассчитанный результат.
+        previous_payload.pop("payment_import_ids", None)
+        if previous_payload == payload:
+            return previous[-1]
+        if not (reason and reason.strip()):
+            raise ApiError(409, "Цифры отличаются от сохранённого результата: укажите причину пересчёта",
+                           "reason_required")
+    payload["payment_import_ids"] = payment_import_ids(db, exp.business_id, list(assignment), start, end)
+    result_hash = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
     res = ExperimentResult(
         experiment_id=exp.id,
         payload=payload,

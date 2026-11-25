@@ -52,6 +52,7 @@ export const AUDIT_ACTION: Record<string, string> = {
   "consent.revoked": "Согласие отозвано",
   "import.accepted": "Импорт принят",
   "import.rejected": "Импорт отклонён",
+  "import.payments_reuploaded": "Повторно загружена та же выписка оплат",
   "import.overwrote_payments": "Импорт перезаписал платежи",
   "experiment.created": "Создан эксперимент",
   "experiment.updated": "Изменён черновик",

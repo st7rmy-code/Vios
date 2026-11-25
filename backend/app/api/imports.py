@@ -32,6 +32,7 @@ from app.models import (
 from app.schemas import ImportOut
 from app.api.consents import active_consent
 from app.services import audit
+from app.services import experiments as experiment_service
 from app.services.csv_import import parse_csv
 from app.storage import get_storage
 
@@ -60,12 +61,20 @@ async def upload(
         raise ApiError(413, f"Файл больше {limit // 1024 // 1024} МБ", "file_too_large")
 
     business = db.get(Business, bid)
+    if business is None:
+        raise ApiError(404, "Бизнес не найден", "not_found")
     parsed = parse_csv(data, kind, today=clock.today(business.timezone))
+    experiment_service.lock_business(db, bid)
     dup = db.execute(
         select(ImportFile).where(ImportFile.business_id == bid, ImportFile.sha256 == parsed.sha256,
                                  ImportFile.status == ImportStatus.accepted)
     ).scalar_one_or_none()
     if dup is not None:
+        if kind is ImportKind.payments and dup.kind is kind:
+            audit.append(db, action=experiment_service.PAYMENTS_REUPLOADED, entity_type="import",
+                         entity_id=str(dup.id), business_id=bid, actor_id=user.id,
+                         payload={"sha256": dup.sha256})
+            db.commit()
         response.status_code = 200
         out = ImportOut.model_validate(dup)
         out.duplicate_of = dup.id
@@ -128,15 +137,13 @@ def _frozen_conflicts(db: Session, bid: uuid.UUID, rows: list[dict]) -> int:
     клиента из его деления; (2) новая оплата попадает в окно уже закрытого эксперимента:
     при закрытии собственник подтвердил, что выгрузка полная.
     """
-    from app.services.experiments import window_of
-
     exps = list(db.execute(select(Experiment).where(
         Experiment.business_id == bid, Experiment.status != ExperimentStatus.draft)).scalars())
     if not exps:
         return 0
     windows: dict[uuid.UUID, tuple] = {}
     for e in exps:
-        w = window_of(db, e)
+        w = experiment_service.window_of(db, e)
         if w:
             windows[e.id] = (*w, e.status is ExperimentStatus.closed)
     by_customer: dict[str, list[tuple]] = {}

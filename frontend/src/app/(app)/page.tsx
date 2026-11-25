@@ -258,12 +258,17 @@ function UploadCard({ onUploaded }: { onUploaded: (imp: ImportFile) => void }) {
     fd.set("file", file);
     const b = businessParam();
     if (b.business_id) fd.set("business_id", b.business_id);
-    const res = await fetch("/api/v1/imports", { method: "POST", body: fd });
-    const body = await res.json().catch(() => null);
-    setBusy(false);
-    if (input.current) input.current.value = "";
-    if (!res.ok) return setError(errorText(body));
-    onUploaded(body as ImportFile);
+    try {
+      const res = await fetch("/api/v1/imports", { method: "POST", body: fd });
+      const body = await res.json().catch(() => null);
+      if (!res.ok || !body) return setError(errorText(body));
+      onUploaded(body as ImportFile);
+    } catch {
+      setError("Не удалось загрузить файл. Проверьте соединение и попробуйте ещё раз.");
+    } finally {
+      setBusy(false);
+      if (input.current) input.current.value = "";
+    }
   }
 
   return (

@@ -1,23 +1,23 @@
 import { ppRange } from "@/lib/format";
 
 /** Результат расчёта (app/stats/estimate.py → EffectResult.to_dict). Деньги в копейках. */
-export type ResultPayload = {
+type ResultPayload = {
   status: "positive" | "not_paying_off" | "negative" | "not_detected" | "insufficient";
   status_label: string;
   n_control: number;
   n_test: number;
   rate_control: number;
   rate_test: number;
-  rate_control_ci: [number, number] | null;
-  rate_test_ci: [number, number] | null;
+  rate_control_ci?: [number, number] | null;
+  rate_test_ci?: [number, number] | null;
   uplift: number;
   uplift_ci: [number, number] | null;
   mde: number | null;
   alpha: number;
   /** доля валовой маржи (0, 1]; 1 — эффект в выручке. В старых результатах поля нет */
   margin?: number;
-  revenue_control_kopecks: number;
-  revenue_test_kopecks: number;
+  revenue_control_kopecks?: number;
+  revenue_test_kopecks?: number;
   net_effect_kopecks: number;
   net_effect_ci_kopecks: [number, number] | null;
   cost_kopecks: number;
@@ -27,6 +27,20 @@ export type ResultPayload = {
   protocol_hash: string;
   by_stratum?: Record<string, Record<"control" | "test", { n: number; rate: number }>> | null;
 };
+
+const LEGACY_STATUS: Partial<Record<string, ResultPayload["status"]>> = {
+  "положительный эффект": "positive",
+  "эффект есть, окупаемость не доказана": "not_paying_off",
+  "отрицательный эффект": "negative",
+  "эффект не обнаружен": "not_detected",
+  "недостаточно данных": "insufficient",
+};
+
+export function normalizeResult(payload: Record<string, unknown>, protocol: Record<string, unknown>): ResultPayload {
+  const result = payload as unknown as ResultPayload;
+  const alpha = typeof protocol.alpha === "number" ? protocol.alpha : 0.05;
+  return { ...result, status: LEGACY_STATUS[result.status] ?? result.status, alpha: result.alpha ?? alpha };
+}
 
 /** 0.042 → «4,2 п.п.», минус настоящий. */
 export const pp1 = (x: number) => `${(x * 100).toFixed(1).replace(".", ",").replace("-", "−")} п.п.`;

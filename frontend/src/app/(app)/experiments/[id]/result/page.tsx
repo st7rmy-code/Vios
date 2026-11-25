@@ -24,7 +24,7 @@ import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { api, errorText, type Schemas } from "@/lib/api/client";
 import { dateTime, kopecksToRub, num, percent } from "@/lib/format";
 import { RESULT, stratumLabel } from "@/lib/labels";
-import { moneyEffectLabel, pp1, upliftSentence, type ResultPayload } from "@/lib/result";
+import { moneyEffectLabel, normalizeResult, pp1, upliftSentence } from "@/lib/result";
 import { neededPerGroup } from "@/lib/stats";
 import { useExperiment } from "@/lib/use-experiment";
 
@@ -45,7 +45,7 @@ export default function ResultPage() {
 
   if (error) return <Alert>{error}</Alert>;
   if (!res || !exp) return <p className="text-muted-foreground">Загрузка…</p>;
-  const r = res.payload as unknown as ResultPayload;
+  const r = normalizeResult(res.payload, exp.protocol);
   const st = RESULT[r.status];
   const insufficient = r.status === "insufficient";
 
@@ -164,7 +164,7 @@ export default function ResultPage() {
           <Card>
             <CardHeader>
               <CardTitle>Прирост возврата</CardTitle>
-              <CardDescription>Если интервал целиком выше нуля, эффект подтверждён. Пунктир — MDE, меньше него замер не различает.</CardDescription>
+              <CardDescription>Если интервал целиком выше нуля, прирост возврата подтверждён.</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="h-60" role="img" aria-label={upliftSentence(r.uplift_ci)}>
@@ -201,7 +201,7 @@ export default function ResultPage() {
                 </dd>
                 <Dt>Стоимость действия C</Dt>
                 <dd className="tabular-nums">{kopecksToRub(r.cost_kopecks)}</dd>
-                <Dt>Доп. выручка минус стоимость (точечно)</Dt>
+                <Dt>{moneyEffectLabel(r)} (точечная оценка)</Dt>
                 <dd className="tabular-nums">{kopecksToRub(r.net_effect_kopecks)}</dd>
                 <Dt>MDE</Dt>
                 <dd className="tabular-nums">{r.mde != null ? pp1(r.mde) : "—"}</dd>
@@ -263,7 +263,7 @@ function Dt({ children }: { children: React.ReactNode }) {
 }
 
 /** Нет интервала — нет усов: нулевые усы выглядели бы как абсолютно точная оценка. */
-function ci2err(point: number, ci: [number, number] | null): [number, number] | undefined {
+function ci2err(point: number, ci?: [number, number] | null): [number, number] | undefined {
   return ci ? [Math.max(point - ci[0], 0), Math.max(ci[1] - point, 0)] : undefined;
 }
 

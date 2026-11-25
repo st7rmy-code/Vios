@@ -1,7 +1,9 @@
 """Сквозные тесты API: импорт → эксперимент → регистрация → закрытие → расчёт."""
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
+from threading import Event
 
 import numpy as np
 
@@ -192,12 +194,25 @@ def test_close_needs_payments_covering_window(client, world, clock_at):
     h = world["h"]["owner"]
     cust, pay, vis = _csvs()
     clock_at(datetime(2026, 10, 20, 9, 0, tzinfo=UTC))  # выписку выгрузили до конца окна
+    header, *rows = pay.splitlines()
+    pay = b"\n".join([header, *(row for row in rows if row.split(b";")[2] <= b"2026-10-20")])
     for kind, data in (("customers", cust), ("payments", pay), ("visits", vis)):
-        _upload(client, h, kind, data)
+        assert _upload(client, h, kind, data).json()["status"] == "accepted"
     eid = client.post("/api/v1/experiments", headers=h, json={"title": "t", "protocol": PROTOCOL}).json()["id"]
     _register(client, h, eid, clock_at)
     r = _close(client, h, eid)
     assert r.status_code == 409 and r.json()["code"] == "payments_not_covering_window"
+    assert _upload(client, h, "visits", vis).status_code == 200
+    assert _close(client, h, eid).status_code == 409
+
+    # Новых оплат нет. Собственник повторно загрузил ту же выписку после конца окна.
+    again = _upload(client, h, "payments", pay)
+    assert again.status_code == 200
+    assert again.json()["duplicate_of"] == again.json()["id"]
+    assert again.json()["created_at"].startswith("2026-10-20")
+    log = client.get("/api/v1/audit?action=import.payments_reuploaded", headers=h).json()
+    assert len(log) == 1 and log[0]["entity_id"] == again.json()["id"]
+    assert _close(client, h, eid).status_code == 200
 
 
 def test_customer_in_registered_experiment_is_excluded(client, world, clock_at):
@@ -206,6 +221,57 @@ def test_customer_in_registered_experiment_is_excluded(client, world, clock_at):
     _register(client, h, eid, clock_at)
     pre = client.post("/api/v1/experiments/preview", headers=h, json=PROTOCOL).json()
     assert pre["cohort_size"] == 0 and pre["excluded_other_experiments"] == 400
+
+
+def test_concurrent_registrations_cannot_use_same_cohort(client, world, clock_at, monkeypatch):
+    from app.services import experiments
+
+    h = world["h"]["owner"]
+    first = _setup_experiment(client, h, title="Первый")
+    second = _setup_experiment(client, h, title="Второй")
+    clock_at(REGISTER_AT)
+    first_read = Event()
+    second_read = Event()
+    load_customers = experiments.load_customers
+
+    def observe_cohort_read(*args, **kwargs):
+        customers = load_customers(*args, **kwargs)
+        if first_read.is_set():
+            second_read.set()
+        else:
+            first_read.set()
+            # Без блокировки второй запрос успевает прочитать когорту до коммита первого.
+            second_read.wait(timeout=2)
+        return customers
+
+    monkeypatch.setattr(experiments, "load_customers", observe_cohort_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_request = pool.submit(client.post, f"/api/v1/experiments/{first}/register", headers=h)
+        assert first_read.wait(timeout=5)
+        second_request = pool.submit(client.post, f"/api/v1/experiments/{second}/register", headers=h)
+        first_response = first_request.result(timeout=10)
+        second_response = second_request.result(timeout=10)
+
+    assert first_response.status_code == 200, first_response.text
+    assert second_response.status_code == 422 and second_response.json()["code"] == "empty_cohort"
+
+
+def test_preview_matches_registration_when_strata_round_down(client, world, clock_at):
+    h = world["h"]["owner"]
+    customers = ["customer_id;first_paid_at;subscription_ends_at;branch"]
+    payments = ["payment_id;customer_id;paid_at;amount"]
+    for i in range(200):
+        customers.append(f"c{i};2026-06-01;2026-07-01;branch{i // 25}")
+        payments.append(f"p{i};c{i};2026-06-01;3000")
+    for kind, lines in (("customers", customers), ("payments", payments)):
+        assert _upload(client, h, kind, "\n".join(lines).encode()).json()["status"] == "accepted"
+
+    pre = client.post("/api/v1/experiments/preview", headers=h, json=PROTOCOL).json()
+    assert [s["n"] for s in pre["strata"]] == [25] * 8
+    assert (pre["n_control"], pre["n_test"]) == (96, 104)
+    eid = client.post("/api/v1/experiments", headers=h, json={"title": "Восемь филиалов", "protocol": PROTOCOL}).json()["id"]
+    registered = _register(client, h, eid, clock_at).json()
+    assert (registered["n_control"], registered["n_test"]) == (pre["n_control"], pre["n_test"])
 
 
 def test_full_flow_recalculation_identical_and_certificate(client, world, clock_at):
@@ -220,6 +286,14 @@ def test_full_flow_recalculation_identical_and_certificate(client, world, clock_
     r1 = client.post(f"/api/v1/experiments/{eid}/calculate", headers=h).json()
     r2 = client.post(f"/api/v1/experiments/{eid}/calculate", headers=h).json()
     assert r1["payload"] == r2["payload"] and r1["result_hash"] == r2["result_hash"]
+
+    # Те же оплаты под другим SHA обновляют источник строк, но числа и версия результата сохраняются.
+    header, *rows = _csvs()[1].splitlines()
+    reordered = _upload(client, h, "payments", b"\n".join([header, *reversed(rows)]))
+    assert reordered.status_code == 201 and reordered.json()["status"] == "accepted"
+    repeated = client.post(f"/api/v1/experiments/{eid}/calculate", headers=h)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json() == r2
     # зерно случайное при регистрации: без эффекта статус чаще всего not_detected (проверено в test_stats)
     from app.stats import STATUS_LABEL
 
