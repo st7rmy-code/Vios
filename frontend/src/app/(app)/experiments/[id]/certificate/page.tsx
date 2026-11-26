@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { api, errorText, type Schemas } from "@/lib/api/client";
 import { addDays, date, dateTime, kopecksToRub, num, percent, rubString } from "@/lib/format";
 import { AUDIT_ACTION, RESULT } from "@/lib/labels";
-import { moneyEffectLabel, upliftSentence, type ResultPayload } from "@/lib/result";
+import { moneyEffectLabel, normalizeResult, upliftSentence } from "@/lib/result";
 import { isManager, useSession } from "@/lib/session";
 import { useExperiment } from "@/lib/use-experiment";
 
@@ -35,9 +35,13 @@ export default function CertificatePage() {
 
   if (error) return <Alert>{error}</Alert>;
   if (!c) return <p className="text-muted-foreground">Загрузка…</p>;
-  const r = c.result as unknown as ResultPayload;
+  const r = normalizeResult(c.result, c.protocol);
   const p = c.protocol as Record<string, string | number>;
   const st = RESULT[r.status];
+  // У результатов раннего MVP окно начиналось на следующий день после среза.
+  const legacy = r.status !== c.result.status;
+  const windowStart = legacy || !c.window_start ? addDays(String(p.as_of), 1) : c.window_start;
+  const windowEnd = legacy || !c.window_end ? addDays(String(p.as_of), Number(p.window_days)) : c.window_end;
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">
@@ -53,8 +57,8 @@ export default function CertificatePage() {
           <p className="text-sm font-medium">{c.business_name}</p>
           <h1 className="text-2xl font-semibold sm:text-3xl">{c.title}</h1>
           <p className="text-sm text-muted-foreground">
-            Зарегистрирован {date(c.registered_at)}, закрыт {date(c.closed_at)}. Окно замера с {date(c.window_start ?? String(p.as_of))} по{" "}
-            {date(c.window_end ?? addDays(String(p.as_of), Number(p.window_days)))}
+            Зарегистрирован {date(c.registered_at)}, закрыт {date(c.closed_at)}. Окно замера с {date(windowStart)} по{" "}
+            {date(windowEnd)}
             {c.data_complete_through && <>, выгрузка оплат полная по {date(c.data_complete_through)}</>}
           </p>
         </header>

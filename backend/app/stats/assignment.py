@@ -26,6 +26,10 @@ def hmac_unit(seed: str, customer_id: str) -> float:
     return (int(hmac_hex(seed, customer_id)[:16], 16) >> 11) / 2**53
 
 
+def control_size(stratum_size: int, share: Decimal) -> int:
+    return int((share * stratum_size).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
 def assign_groups(
     items: Iterable[tuple[str, str]],
     seed: str,
@@ -46,7 +50,7 @@ def assign_groups(
     result: dict[str, str] = {}
     for stratum in sorted(by_stratum):
         ids = sorted(by_stratum[stratum], key=lambda cid: (hmac_hex(seed, cid), cid))
-        n_control = int((share * len(ids)).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+        n_control = control_size(len(ids), share)
         for i, cid in enumerate(ids):
             result[cid] = CONTROL if i < n_control else TEST
     return result

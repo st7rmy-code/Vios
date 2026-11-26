@@ -5,12 +5,12 @@
 
 * `backend/` — Python 3.12, FastAPI, SQLAlchemy 2, Alembic, PostgreSQL, Pydantic v2.
 * `frontend/` — Next.js 15, TypeScript, Tailwind, shadcn/ui, Recharts; клиент API из `backend/openapi.json`.
-* `docker-compose.yml` — Postgres 16, MinIO (S3), бэкенд и фронтенд.
+* `docker-compose.yml` — Postgres 16, S3-хранилище SILO, бэкенд и фронтенд.
 
 ## Запуск
 
 ```bash
-docker compose up --build
+docker compose up -d --build --wait
 docker compose exec backend python -m app.cli create-admin admin <пароль>
 # Интерфейс: http://localhost:3000, API: http://localhost:8000/docs
 

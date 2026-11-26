@@ -121,7 +121,7 @@ export function ExperimentWizard({ initial }: { initial?: Experiment }) {
     let stale = false;
     Promise.all(
       SHARES.map((s) =>
-        api.POST("/api/v1/stats/mde", { body: { baseline, ...expectedSplit(n, s / 100) } }).then(({ data }) => ({
+        api.POST("/api/v1/stats/mde", { body: { baseline, ...expectedSplit(preview.strata, s / 100) } }).then(({ data }) => ({
           share: s,
           mde: data?.mde ?? null,
         })),
@@ -132,19 +132,19 @@ export function ExperimentWizard({ initial }: { initial?: Experiment }) {
     return () => {
       stale = true;
     };
-  }, [preview, baseline, n]);
+  }, [preview, baseline]);
   useEffect(() => {
     if (!preview) return;
     let stale = false;
     setMde(null);
     api
-      .POST("/api/v1/stats/mde", { body: { baseline, ...expectedSplit(n, share / 100) } })
+      .POST("/api/v1/stats/mde", { body: { baseline, ...expectedSplit(preview.strata, share / 100) } })
       .then(({ data }) => !stale && setMde(data ?? null))
       .catch(() => !stale && setError("Не удалось посчитать MDE, проверьте соединение"));
     return () => {
       stale = true;
     };
-  }, [preview, baseline, n, share]);
+  }, [preview, baseline, share]);
 
   const tooSmall = mde != null && (mde.n_control < MIN_GROUP || mde.n_test < MIN_GROUP);
   const mdeTooBig = mde?.mde == null || mde.mde > MAX_MDE;

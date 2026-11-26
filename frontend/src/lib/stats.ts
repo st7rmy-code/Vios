@@ -6,9 +6,15 @@ export function roundHalfEven(x: number): number {
   return Math.round(x);
 }
 
-export function expectedSplit(n: number, share: number): { n_control: number; n_test: number } {
-  const n_control = roundHalfEven(n * share);
-  return { n_control, n_test: n - n_control };
+export function expectedSplit(strata: readonly { n: number }[], share: number): { n_control: number; n_test: number } {
+  let n_control = 0;
+  let n_test = 0;
+  for (const { n } of strata) {
+    const control = roundHalfEven(n * share);
+    n_control += control;
+    n_test += n - control;
+  }
+  return { n_control, n_test };
 }
 
 /**
